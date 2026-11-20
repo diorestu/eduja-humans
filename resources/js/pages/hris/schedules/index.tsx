@@ -1,0 +1,2603 @@
+import { Head, router, useForm, usePage } from '@inertiajs/react';
+import {
+    CalendarDays,
+    Pencil,
+    Filter,
+    Plus,
+    RefreshCcw,
+    Save,
+    Trash2,
+    WandSparkles,
+    Upload,
+    Download,
+    Grid3X3,
+    List,
+    Search,
+    Users,
+    CalendarRange,
+    ChevronLeft,
+    ChevronRight,
+} from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import ActionIconButton from '@/components/action-icon-button';
+import InputError from '@/components/input-error';
+import { Button } from '@/components/ui/button';
+import {
+    Card,
+    CardContent,
+    CardDescription,
+    CardHeader,
+    CardTitle,
+} from '@/components/ui/card';
+import { Checkbox } from '@/components/ui/checkbox';
+import {
+    Dialog,
+    DialogContent,
+    DialogDescription,
+    DialogHeader,
+    DialogTitle,
+} from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import SearchableSelect from '@/components/ui/searchable-select';
+import {
+    Select,
+    SelectContent,
+    SelectItem,
+    SelectTrigger,
+    SelectValue,
+} from '@/components/ui/select';
+import AppLayout from '@/layouts/app-layout';
+import {
+    index as schedulesIndex,
+    roster as scheduleRoster,
+    store as scheduleStore,
+} from '@/routes/hris/schedules';
+import { cn, formatDeviceDate } from '@/lib/utils';
+import scheduleShifts from '@/routes/hris/schedules/shifts';
+import type { BreadcrumbItem } from '@/types';
+
+type EmployeeOption = {
+    id: number;
+    label: string;
+};
+
+type ScheduleDay = {
+    id: number | null;
+    date: string;
+    label: string;
+    shift_code: string;
+    start_time: string | null;
+    end_time: string | null;
+    is_day_off: boolean;
+    notes: string | null;
+};
+
+type Filters = {
+    month: string;
+    employee_id: string;
+};
+
+type ShiftTemplate = {
+    start_time: string | null;
+    end_time: string | null;
+    is_day_off: boolean;
+};
+
+type ShiftOption = {
+    id: number;
+    code: string;
+    name: string;
+    start_time: string | null;
+    end_time: string | null;
+    is_day_off: boolean;
+    is_wfa?: boolean;
+    late_tolerance_minutes: number;
+};
+
+type Holiday = {
+    id: number;
+    date: string;
+    name: string;
+    holiday_type?: string;
+    is_national_holiday: boolean;
+};
+
+type MonthlyMatrixDay = {
+    date: string;
+    day: number;
+    day_name: string;
+    is_monday?: boolean;
+    is_sunday: boolean;
+    is_saturday: boolean;
+    is_holiday: boolean;
+    holiday_name?: string | null;
+};
+
+type MonthlyMatrixSchedule = {
+    id: number | null;
+    shift_code: string;
+    start_time: string | null;
+    end_time: string | null;
+    is_day_off: boolean;
+    is_wfa?: boolean;
+    notes?: string | null;
+};
+
+type MonthlyMatrixRow = {
+    employee_id: number;
+    employee_code: string;
+    employee_name: string;
+    employee_label: string;
+    schedules: Record<string, MonthlyMatrixSchedule>;
+    total_work_days: number;
+    total_off_days: number;
+};
+
+type MonthlyMatrix = {
+    days: MonthlyMatrixDay[];
+    rows: MonthlyMatrixRow[];
+};
+
+type PageProps = {
+    employees: EmployeeOption[];
+    filters: Filters;
+    shifts: ShiftOption[];
+    scheduleDays: ScheduleDay[];
+    shiftTemplates: Record<string, ShiftTemplate>;
+    holidays: Holiday[];
+    yearHolidays?: Holiday[];
+    activeYear?: number;
+    monthlyMatrix?: MonthlyMatrix;
+};
+
+type RosterFormData = {
+    employee_id: string;
+    apply_scope: 'single' | 'selected' | 'all';
+    target_employee_ids: string[];
+    start_date: string;
+    end_date: string;
+    pattern_text: string;
+    pattern: string[];
+};
+
+type QuickScheduleFormData = {
+    employee_id: string;
+    work_date: string;
+    shift_code: string;
+    notes: string;
+};
+
+type ShiftFormData = {
+    name: string;
+    start_time: string;
+    end_time: string;
+    late_tolerance_minutes: number;
+    is_wfa: boolean;
+};
+
+type ScheduleRow = {
+    id: number | null;
+    date: string;
+    label: string;
+    shift_code: string;
+    start_time: string;
+    end_time: string;
+    is_day_off: boolean;
+    is_wfa?: boolean;
+    notes: string;
+};
+
+const breadcrumbs: BreadcrumbItem[] = [
+    {
+        title: 'Jadwal Kerja',
+        href: schedulesIndex(),
+    },
+];
+
+const buildShiftCodeFromTimes = (
+    startTime: string,
+    endTime: string,
+    isDayOff: boolean,
+    isWfa: boolean = false,
+) => {
+    if (isDayOff || startTime === '' || endTime === '') {
+        return 'OFF';
+    }
+
+    const base = `${startTime.slice(0, 2)}${endTime.slice(0, 2)}`;
+    return isWfa ? `${base}-WFA` : base;
+};
+
+const formatShiftTime = (shift: {
+    start_time: string | null;
+    end_time: string | null;
+    is_day_off: boolean;
+}) => {
+    if (shift.is_day_off) {
+        return 'Libur';
+    }
+
+    if (shift.start_time === null || shift.end_time === null) {
+        return '-';
+    }
+
+    return `${shift.start_time} - ${shift.end_time}`;
+};
+
+export default function SchedulePage() {
+    const {
+        employees,
+        filters,
+        shifts,
+        scheduleDays,
+        shiftTemplates,
+        holidays,
+        yearHolidays = [],
+        activeYear,
+        monthlyMatrix,
+    } = usePage<PageProps>().props;
+
+    const [activeTab, setActiveTab] = useState<'matrix' | 'vertical'>('matrix');
+    const [viewPeriod, setViewPeriod] = useState<'month' | 'week'>('month');
+    const [selectedWeekIndex, setSelectedWeekIndex] = useState<number>(0);
+    const [matrixSearch, setMatrixSearch] = useState('');
+    const [filterState, setFilterState] = useState<Filters>(filters);
+    const [holidayPopupFilter, setHolidayPopupFilter] = useState<'all' | 'month'>('all');
+
+    const currentActiveYear = useMemo(() => {
+        if (activeYear) return activeYear;
+        if (filterState.month && filterState.month.length >= 4) {
+            const parsed = parseInt(filterState.month.substring(0, 4), 10);
+            if (!isNaN(parsed)) return parsed;
+        }
+        return new Date().getFullYear();
+    }, [activeYear, filterState.month]);
+
+    const activeYearHolidays = useMemo(() => {
+        if (yearHolidays && yearHolidays.length > 0) {
+            return yearHolidays;
+        }
+        return holidays;
+    }, [yearHolidays, holidays]);
+
+    const displayYearHolidays = useMemo(() => {
+        if (holidayPopupFilter === 'month' && filterState.month) {
+            return activeYearHolidays.filter((h) => h.date.startsWith(filterState.month));
+        }
+        return activeYearHolidays;
+    }, [activeYearHolidays, holidayPopupFilter, filterState.month]);
+
+    const safeMatrixDays = useMemo(() => monthlyMatrix?.days ?? [], [monthlyMatrix?.days]);
+    const safeMatrixRows = useMemo(() => monthlyMatrix?.rows ?? [], [monthlyMatrix?.rows]);
+
+    const weeks = useMemo(() => {
+        if (!safeMatrixDays || safeMatrixDays.length === 0) return [];
+
+        const monthNames = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
+        const result: {
+            index: number;
+            weekNumber: number;
+            label: string;
+            startDate: string;
+            endDate: string;
+            days: MonthlyMatrixDay[];
+        }[] = [];
+        let currentWeekDays: MonthlyMatrixDay[] = [];
+        let weekIndex = 0;
+
+        safeMatrixDays.forEach((day) => {
+            const isMonday = day.is_monday ?? (day.day_name === 'Sen' || new Date(day.date + 'T00:00:00').getDay() === 1);
+
+            if (currentWeekDays.length > 0 && isMonday) {
+                const startDay = currentWeekDays[0];
+                const endDay = currentWeekDays[currentWeekDays.length - 1];
+                const mIdx = parseInt(startDay.date.slice(5, 7), 10);
+                const mName = monthNames[mIdx] || '';
+                result.push({
+                    index: weekIndex,
+                    weekNumber: weekIndex + 1,
+                    label: `Minggu ${weekIndex + 1} (${String(startDay.day).padStart(2, '0')} - ${String(endDay.day).padStart(2, '0')} ${mName})`,
+                    startDate: startDay.date,
+                    endDate: endDay.date,
+                    days: currentWeekDays,
+                });
+                weekIndex++;
+                currentWeekDays = [];
+            }
+
+            currentWeekDays.push(day);
+        });
+
+        if (currentWeekDays.length > 0) {
+            const startDay = currentWeekDays[0];
+            const endDay = currentWeekDays[currentWeekDays.length - 1];
+            const mIdx = parseInt(startDay.date.slice(5, 7), 10);
+            const mName = monthNames[mIdx] || '';
+            result.push({
+                index: weekIndex,
+                weekNumber: weekIndex + 1,
+                label: `Minggu ${weekIndex + 1} (${String(startDay.day).padStart(2, '0')} - ${String(endDay.day).padStart(2, '0')} ${mName})`,
+                startDate: startDay.date,
+                endDate: endDay.date,
+                days: currentWeekDays,
+            });
+        }
+
+        return result;
+    }, [safeMatrixDays]);
+
+    useEffect(() => {
+        setSelectedWeekIndex(0);
+    }, [filterState.month]);
+
+    const activeWeek = weeks[selectedWeekIndex] || weeks[0];
+
+    const displayedMatrixDays = useMemo(() => {
+        if (viewPeriod === 'month') return safeMatrixDays;
+        return activeWeek?.days ?? safeMatrixDays;
+    }, [viewPeriod, safeMatrixDays, activeWeek]);
+
+    const getRowSummary = (row: MonthlyMatrixRow) => {
+        if (viewPeriod === 'month') {
+            return {
+                work: row.total_work_days ?? 0,
+                off: row.total_off_days ?? 0,
+            };
+        }
+        let work = 0;
+        let off = 0;
+        displayedMatrixDays.forEach((day) => {
+            const sched = row.schedules?.[day.date];
+            const isOff = sched ? (sched.is_day_off || sched.shift_code === 'OFF') : true;
+            if (isOff) off++;
+            else work++;
+        });
+        return { work, off };
+    };
+
+    const filteredMatrixRows = useMemo(() => {
+        if (!safeMatrixRows || safeMatrixRows.length === 0) return [];
+        if (!matrixSearch.trim()) return safeMatrixRows;
+        const query = matrixSearch.toLowerCase();
+        return safeMatrixRows.filter(
+            (row) =>
+                (row.employee_name ?? '').toLowerCase().includes(query) ||
+                (row.employee_code ?? '').toLowerCase().includes(query),
+        );
+    }, [safeMatrixRows, matrixSearch]);
+    const [quickDialogOpen, setQuickDialogOpen] = useState(false);
+    const [rosterDialogOpen, setRosterDialogOpen] = useState(false);
+    const [importDialogOpen, setImportDialogOpen] = useState(false);
+    const [shiftListDialogOpen, setShiftListDialogOpen] = useState(false);
+    const [shiftDialogOpen, setShiftDialogOpen] = useState(false);
+    const [calendarDialogOpen, setCalendarDialogOpen] = useState(false);
+    const [editingShift, setEditingShift] = useState<ShiftOption | null>(null);
+    const [deletingShift, setDeletingShift] = useState<ShiftOption | null>(
+        null,
+    );
+    const [deletingSchedule, setDeletingSchedule] =
+        useState<ScheduleRow | null>(null);
+    const [scheduleRows, setScheduleRows] = useState<ScheduleRow[]>([]);
+
+    const displayedScheduleRows = useMemo(() => {
+        if (viewPeriod === 'month' || !activeWeek?.days) return scheduleRows ?? [];
+        const weekDateSet = new Set(activeWeek.days.map((d) => d.date));
+        return (scheduleRows ?? []).filter((row) => weekDateSet.has(row.date));
+    }, [scheduleRows, viewPeriod, activeWeek]);
+    const [holidayFormData, setHolidayFormData] = useState({
+        date: filters.month ? `${filters.month}-01` : new Date().toISOString().slice(0, 10),
+        name: '',
+        holiday_type: 'national',
+        apply_to_schedule: true,
+    });
+    const [isSubmittingHoliday, setIsSubmittingHoliday] = useState(false);
+    const [isSyncingHolidays, setIsSyncingHolidays] = useState(false);
+    const [deletingHolidayId, setDeletingHolidayId] = useState<number | null>(null);
+
+    const shiftOptions = useMemo(
+        () =>
+            shifts.map((shift) => ({
+                value: shift.code,
+                label: `${shift.code} - ${formatShiftTime(shift)}`,
+                keywords: `${shift.name} ${shift.start_time ?? ''} ${shift.end_time ?? ''}`,
+            })),
+        [shifts],
+    );
+
+    const shiftLookup = useMemo(
+        () => new Map(shifts.map((shift) => [shift.code, shift])),
+        [shifts],
+    );
+
+    const employeeLookup = useMemo(
+        () =>
+            new Map(
+                employees.map((employee) => [
+                    String(employee.id),
+                    employee.label,
+                ]),
+            ),
+        [employees],
+    );
+
+    const defaultWorkingShiftCode = useMemo(
+        () =>
+            shifts.find((shift) => !shift.is_day_off)?.code ??
+            shifts[0]?.code ??
+            '',
+        [shifts],
+    );
+
+    const rosterPatternPlaceholder = useMemo(
+        () =>
+            shifts
+                .slice(0, 4)
+                .map((shift) => shift.code)
+                .join(',') || '0817,0918,1701,OFF',
+        [shifts],
+    );
+
+    const rosterForm = useForm<RosterFormData>({
+        employee_id: filters.employee_id,
+        apply_scope: 'single',
+        target_employee_ids: [],
+        start_date: `${filters.month}-01`,
+        end_date: `${filters.month}-07`,
+        pattern_text: rosterPatternPlaceholder,
+        pattern: [],
+    });
+
+    const importForm = useForm<{
+        file: File | null;
+        month: string;
+    }>({
+        file: null,
+        month: filters.month || '',
+    });
+
+    const quickScheduleForm = useForm<QuickScheduleFormData>({
+        employee_id: filters.employee_id,
+        work_date: `${filters.month}-01`,
+        shift_code: defaultWorkingShiftCode,
+        notes: '',
+    });
+
+    const shiftForm = useForm<ShiftFormData>({
+        name: '',
+        start_time: '08:00',
+        end_time: '17:00',
+        late_tolerance_minutes: 15,
+        is_wfa: false,
+    });
+
+    useEffect(() => {
+        setFilterState(filters);
+    }, [filters]);
+
+    useEffect(() => {
+        setScheduleRows(
+            scheduleDays.map((day) => ({
+                id: day.id,
+                date: day.date,
+                label: day.label,
+                shift_code: day.shift_code,
+                start_time: day.start_time ?? '',
+                end_time: day.end_time ?? '',
+                is_day_off: day.is_day_off,
+                notes: day.notes ?? '',
+            })),
+        );
+    }, [scheduleDays]);
+
+    const applyShiftSelection = (shiftCode: string): ShiftTemplate => {
+        return (
+            shiftTemplates[shiftCode] ?? {
+                start_time: null,
+                end_time: null,
+                is_day_off: true,
+            }
+        );
+    };
+
+    const applyFilter = () => {
+        router.get(schedulesIndex.url(), filterState, {
+            preserveState: true,
+            preserveScroll: true,
+            replace: true,
+        });
+    };
+
+    const downloadTemplate = () => {
+        window.open(
+            `/hris/schedules/import/template?month=${filterState.month}`,
+            '_blank',
+        );
+    };
+
+    const submitImport = (e: React.FormEvent) => {
+        e.preventDefault();
+        importForm.transform((data) => ({
+            ...data,
+            month: filterState.month,
+        }));
+        importForm.post(`/hris/schedules/import?month=${encodeURIComponent(filterState.month)}`, {
+            preserveScroll: true,
+            onSuccess: () => {
+                setImportDialogOpen(false);
+                importForm.reset();
+                applyFilter();
+            },
+        });
+    };
+
+    const openQuickScheduleDialog = () => {
+        quickScheduleForm.clearErrors();
+        quickScheduleForm.setData({
+            employee_id: filterState.employee_id,
+            work_date: `${filterState.month}-01`,
+            shift_code: defaultWorkingShiftCode,
+            notes: '',
+        });
+        setQuickDialogOpen(true);
+    };
+
+    const openRosterDialog = () => {
+        rosterForm.clearErrors();
+        rosterForm.setData({
+            employee_id: filterState.employee_id,
+            apply_scope: 'single',
+            target_employee_ids: [],
+            start_date: `${filterState.month}-01`,
+            end_date: `${filterState.month}-07`,
+            pattern_text: rosterPatternPlaceholder,
+            pattern: [],
+        });
+        setRosterDialogOpen(true);
+    };
+
+    const openShiftDialog = () => {
+        setEditingShift(null);
+        shiftForm.clearErrors();
+        shiftForm.setData({
+            name: '',
+            start_time: '08:00',
+            end_time: '17:00',
+            late_tolerance_minutes: 15,
+            is_wfa: false,
+        });
+        setShiftDialogOpen(true);
+    };
+
+    const openEditShiftDialog = (shift: ShiftOption) => {
+        setEditingShift(shift);
+        shiftForm.clearErrors();
+        shiftForm.setData({
+            name: shift.name,
+            start_time: shift.start_time ?? '08:00',
+            end_time: shift.end_time ?? '17:00',
+            late_tolerance_minutes: shift.late_tolerance_minutes,
+            is_wfa: Boolean(shift.is_wfa),
+        });
+        setShiftDialogOpen(true);
+    };
+
+    const updateRowShift = (targetDate: string, shiftCode: string) => {
+        const selectedShift = applyShiftSelection(shiftCode);
+
+        setScheduleRows((prev) =>
+            prev.map((item) =>
+                item.date === targetDate
+                    ? {
+                          ...item,
+                          shift_code: shiftCode,
+                          start_time: selectedShift.start_time ?? '',
+                          end_time: selectedShift.end_time ?? '',
+                          is_day_off: selectedShift.is_day_off,
+                      }
+                    : item,
+            ),
+        );
+    };
+
+    const updateRosterScope = (scope: RosterFormData['apply_scope']) => {
+        rosterForm.clearErrors();
+        rosterForm.setData({
+            ...rosterForm.data,
+            apply_scope: scope,
+            target_employee_ids:
+                scope === 'selected' &&
+                rosterForm.data.target_employee_ids.length === 0
+                    ? [rosterForm.data.employee_id].filter(Boolean)
+                    : rosterForm.data.target_employee_ids,
+        });
+    };
+
+    const toggleRosterTargetEmployee = (employeeId: string) => {
+        rosterForm.setData({
+            ...rosterForm.data,
+            target_employee_ids: rosterForm.data.target_employee_ids.includes(
+                employeeId,
+            )
+                ? rosterForm.data.target_employee_ids.filter(
+                      (id) => id !== employeeId,
+                  )
+                : [...rosterForm.data.target_employee_ids, employeeId],
+        });
+    };
+
+    const saveSchedule = () => {
+        router.post(
+            scheduleStore.url(),
+            {
+                employee_id: filterState.employee_id,
+                month: filterState.month,
+                entries: scheduleRows.map((row) => ({
+                    date: row.date,
+                    shift_code: row.shift_code,
+                    start_time: row.start_time || null,
+                    end_time: row.end_time || null,
+                    is_day_off: row.is_day_off,
+                    notes: row.notes || null,
+                })),
+            },
+            {
+                preserveScroll: true,
+            },
+        );
+    };
+
+    const applyRoster = () => {
+        const pattern = rosterForm.data.pattern_text
+            .split(',')
+            .map((item) => item.trim().toUpperCase())
+            .filter((item) => item !== '');
+
+        rosterForm.transform((data) => ({
+            employee_id:
+                data.apply_scope === 'single' ? data.employee_id : undefined,
+            apply_scope: data.apply_scope,
+            target_employee_ids:
+                data.apply_scope === 'selected'
+                    ? data.target_employee_ids
+                    : undefined,
+            start_date: data.start_date,
+            end_date: data.end_date,
+            pattern,
+        }));
+
+        rosterForm.post(scheduleRoster.url(), {
+            preserveScroll: true,
+            onSuccess: () => {
+                setRosterDialogOpen(false);
+            },
+        });
+    };
+
+    const saveQuickSchedule = () => {
+        const selectedShift = applyShiftSelection(
+            quickScheduleForm.data.shift_code,
+        );
+
+        quickScheduleForm.transform((data) => ({
+            employee_id: data.employee_id,
+            month: data.work_date.slice(0, 7),
+            entries: [
+                {
+                    date: data.work_date,
+                    shift_code: data.shift_code,
+                    start_time: selectedShift.start_time,
+                    end_time: selectedShift.end_time,
+                    is_day_off: selectedShift.is_day_off,
+                    notes: data.notes || null,
+                },
+            ],
+        }));
+
+        quickScheduleForm.post(scheduleStore.url(), {
+            preserveScroll: true,
+            onSuccess: () => {
+                const nextFilters = {
+                    month: quickScheduleForm.data.work_date.slice(0, 7),
+                    employee_id: quickScheduleForm.data.employee_id,
+                };
+
+                setQuickDialogOpen(false);
+                setFilterState(nextFilters);
+                quickScheduleForm.reset();
+
+                router.get(schedulesIndex.url(), nextFilters, {
+                    preserveState: true,
+                    preserveScroll: true,
+                    replace: true,
+                });
+            },
+        });
+    };
+
+    const saveShift = () => {
+        const options = {
+            preserveScroll: true,
+            onSuccess: () => {
+                setShiftDialogOpen(false);
+                setEditingShift(null);
+                router.get(schedulesIndex.url(), filterState, {
+                    preserveState: true,
+                    preserveScroll: true,
+                    replace: true,
+                });
+            },
+        };
+
+        if (editingShift) {
+            shiftForm.put(`/hris/schedules/shifts/${editingShift.id}`, options);
+            return;
+        }
+
+        shiftForm.post(scheduleShifts.store.url(), options);
+    };
+
+    const deleteShift = () => {
+        if (!deletingShift) {
+            return;
+        }
+
+        router.delete(`/hris/schedules/shifts/${deletingShift.id}`, {
+            preserveScroll: true,
+            onSuccess: () => {
+                setDeletingShift(null);
+                router.get(schedulesIndex.url(), filterState, {
+                    preserveState: true,
+                    preserveScroll: true,
+                    replace: true,
+                });
+            },
+        });
+    };
+
+    const deleteSchedule = () => {
+        if (!deletingSchedule?.id) {
+            return;
+        }
+
+        router.delete(`/hris/schedules/${deletingSchedule.id}`, {
+            preserveScroll: true,
+            onSuccess: () => {
+                setDeletingSchedule(null);
+                router.get(schedulesIndex.url(), filterState, {
+                    preserveState: true,
+                    preserveScroll: true,
+                    replace: true,
+                });
+            },
+        });
+    };
+
+    const syncHolidays = () => {
+        setIsSyncingHolidays(true);
+        router.post(
+            '/hris/schedules/holidays/sync',
+            {
+                month: filterState.month || null,
+                year: currentActiveYear,
+                employee_id: filterState.employee_id ? Number(filterState.employee_id) : null,
+            },
+            {
+                preserveScroll: true,
+                onSuccess: () => {
+                    router.get(schedulesIndex.url(), filterState, {
+                        preserveState: true,
+                        preserveScroll: true,
+                        replace: true,
+                    });
+                },
+                onFinish: () => {
+                    setIsSyncingHolidays(false);
+                },
+            },
+        );
+    };
+
+    const handleOpenCalendar = () => {
+        setHolidayFormData((prev) => ({
+            ...prev,
+            date: filterState.month ? `${filterState.month}-01` : new Date().toISOString().slice(0, 10),
+            name: '',
+            holiday_type: 'national',
+            apply_to_schedule: true,
+        }));
+        setCalendarDialogOpen(true);
+    };
+
+    const handleSaveHoliday = (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!holidayFormData.name.trim() || !holidayFormData.date) {
+            return;
+        }
+
+        setIsSubmittingHoliday(true);
+        router.post(
+            '/hris/schedules/holidays',
+            holidayFormData,
+            {
+                preserveScroll: true,
+                onSuccess: () => {
+                    setHolidayFormData((prev) => ({
+                        ...prev,
+                        name: '',
+                    }));
+                    setIsSubmittingHoliday(false);
+                },
+                onError: () => {
+                    setIsSubmittingHoliday(false);
+                },
+            },
+        );
+    };
+
+    const handleDeleteHoliday = (holiday: Holiday) => {
+        if (!confirm(`Hapus hari libur "${holiday.name}"?`)) {
+            return;
+        }
+
+        setDeletingHolidayId(holiday.id);
+        router.delete(`/hris/schedules/holidays/${holiday.id}`, {
+            preserveScroll: true,
+            onFinish: () => {
+                setDeletingHolidayId(null);
+            },
+        });
+    };
+
+    const getHolidayTypeInfo = (type?: string, isNational?: boolean) => {
+        if (type === 'national' || (isNational && !type)) {
+            return {
+                label: 'Libur Nasional',
+                badgeClass: 'bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-200 border-rose-200 dark:border-rose-800',
+            };
+        }
+        if (type === 'joint_leave') {
+            return {
+                label: 'Cuti Bersama',
+                badgeClass: 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-200 border-amber-200 dark:border-amber-800',
+            };
+        }
+        if (type === 'company') {
+            return {
+                label: 'Libur Perusahaan',
+                badgeClass: 'bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-200 border-blue-200 dark:border-blue-800',
+            };
+        }
+        return {
+            label: 'Lainnya',
+            badgeClass: 'bg-slate-100 text-slate-800 dark:bg-slate-800 dark:text-slate-200 border-slate-200 dark:border-slate-700',
+        };
+    };
+
+    const quickShift = shiftLookup.get(quickScheduleForm.data.shift_code);
+    const shiftPreviewCode = buildShiftCodeFromTimes(
+        shiftForm.data.start_time,
+        shiftForm.data.end_time,
+        false,
+        shiftForm.data.is_wfa,
+    );
+
+    return (
+        <AppLayout breadcrumbs={breadcrumbs}>
+            <Head title="Jadwal Kerja" />
+
+            <div className="space-y-4 p-4">
+                <Card>
+                    <CardHeader className="flex flex-row items-start justify-between gap-3">
+                        <div>
+                            <CardTitle>Filter Jadwal</CardTitle>
+                            <CardDescription>
+                                Pilih karyawan dan bulan untuk melihat jadwal
+                                kerja.
+                            </CardDescription>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                            <Button
+                                type="button"
+                                variant="outline"
+                                onClick={() => setShiftListDialogOpen(true)}
+                            >
+                                <Plus className="size-4" />
+                                Kelola Shift
+                            </Button>
+                            <Button
+                                type="button"
+                                variant="outline"
+                                onClick={() => setImportDialogOpen(true)}
+                            >
+                                <Upload className="size-4" />
+                                Import Jadwal
+                            </Button>
+                            <Button
+                                type="button"
+                                variant="outline"
+                                onClick={openRosterDialog}
+                            >
+                                <WandSparkles className="size-4" />
+                                Roster Shift Otomatis
+                            </Button>
+                            <Button
+                                type="button"
+                                onClick={openQuickScheduleDialog}
+                            >
+                                <Plus className="size-4" />
+                                Tambah Jam Kerja
+                            </Button>
+                        </div>
+                    </CardHeader>
+                    <CardContent>
+                        <div className="grid gap-3 md:grid-cols-[220px_260px_auto]">
+                            <div className="grid gap-2">
+                                <Label htmlFor="filter_month">Bulan</Label>
+                                <div className="relative">
+                                    <CalendarDays className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
+                                    <Input
+                                        id="filter_month"
+                                        type="month"
+                                        value={filterState.month}
+                                        onChange={(event) =>
+                                            setFilterState((prev) => ({
+                                                ...prev,
+                                                month: event.target.value,
+                                            }))
+                                        }
+                                        className="pl-9"
+                                    />
+                                </div>
+                            </div>
+                            <div className="grid gap-2">
+                                <Label htmlFor="filter_employee">
+                                    Karyawan
+                                </Label>
+                                <SearchableSelect
+                                    id="filter_employee"
+                                    value={
+                                        filterState.employee_id === ''
+                                            ? '__none'
+                                            : filterState.employee_id
+                                    }
+                                    onValueChange={(value) =>
+                                        setFilterState((prev) => ({
+                                            ...prev,
+                                            employee_id:
+                                                value === '__none' ? '' : value,
+                                        }))
+                                    }
+                                    placeholder="Pilih karyawan"
+                                    searchPlaceholder="Cari karyawan..."
+                                    options={[
+                                        { value: '__none', label: '-' },
+                                        ...employees.map((employee) => ({
+                                            value: String(employee.id),
+                                            label: employee.label,
+                                        })),
+                                    ]}
+                                    className="w-full"
+                                />
+                            </div>
+                            <div className="flex items-end gap-2">
+                                <Button type="button" onClick={applyFilter}>
+                                    <Filter className="size-4" />
+                                    Tampilkan
+                                </Button>
+                                <Button
+                                    type="button"
+                                    variant="outline"
+                                    onClick={() => {
+                                        const reset = {
+                                            month: new Date()
+                                                .toISOString()
+                                                .slice(0, 7),
+                                            employee_id: employees[0]
+                                                ? String(employees[0].id)
+                                                : '',
+                                        };
+
+                                        setFilterState(reset);
+                                        router.get(
+                                            schedulesIndex.url(),
+                                            reset,
+                                            {
+                                                preserveState: true,
+                                                preserveScroll: true,
+                                                replace: true,
+                                            },
+                                        );
+                                    }}
+                                >
+                                    <RefreshCcw className="size-4" />
+                                    Reset
+                                </Button>
+                            </div>
+                        </div>
+                    </CardContent>
+                </Card>
+
+                <Card>
+                    <CardHeader className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                        <div>
+                            <CardTitle>Schedule Kerja</CardTitle>
+                            <CardDescription>
+                                {viewPeriod === 'week' && activeWeek ? (
+                                    activeTab === 'matrix' ? (
+                                        <>
+                                            Matriks Horizontal Seluruh Karyawan |{' '}
+                                            <span className="font-semibold text-foreground">
+                                                {activeWeek.label}
+                                            </span>{' '}
+                                            ({monthlyMatrix?.rows?.length ?? 0} Karyawan)
+                                        </>
+                                    ) : (
+                                        <>
+                                            Karyawan:{' '}
+                                            <span className="font-semibold text-foreground">
+                                                {employeeLookup.get(filterState.employee_id) ?? '-'}
+                                            </span>{' '}
+                                            |{' '}
+                                            <span className="font-semibold text-foreground">
+                                                {activeWeek.label}
+                                            </span>
+                                        </>
+                                    )
+                                ) : (
+                                    activeTab === 'matrix' ? (
+                                        <>
+                                            Matriks Horizontal Seluruh Karyawan | Bulan:{' '}
+                                            <span className="font-semibold text-foreground">
+                                                {filterState.month}
+                                            </span>{' '}
+                                            ({monthlyMatrix?.rows?.length ?? 0} Karyawan)
+                                        </>
+                                    ) : (
+                                        <>
+                                            Karyawan:{' '}
+                                            <span className="font-semibold text-foreground">
+                                                {employeeLookup.get(filterState.employee_id) ?? '-'}
+                                            </span>{' '}
+                                            | Bulan:{' '}
+                                            <span className="font-semibold text-foreground">
+                                                {filterState.month}
+                                            </span>
+                                        </>
+                                    )
+                                )}
+                            </CardDescription>
+                        </div>
+                        <div className="flex flex-wrap items-center justify-end gap-2">
+                            <Button
+                                type="button"
+                                variant="outline"
+                                onClick={handleOpenCalendar}
+                            >
+                                <CalendarDays className="size-4" />
+                                Kalender Kerja
+                            </Button>
+                            {activeTab === 'vertical' && (
+                                <>
+                                    <Button
+                                        type="button"
+                                        variant="outline"
+                                        onClick={syncHolidays}
+                                        disabled={
+                                            isSyncingHolidays ||
+                                            filterState.month === '' ||
+                                            filterState.employee_id === ''
+                                        }
+                                    >
+                                        <RefreshCcw className={cn("size-4", isSyncingHolidays && "animate-spin")} />
+                                        {isSyncingHolidays ? 'Menyinkronkan...' : 'Sync hari libur'}
+                                    </Button>
+                                    <Button
+                                        type="button"
+                                        onClick={saveSchedule}
+                                        disabled={
+                                            scheduleRows.length === 0 ||
+                                            filterState.employee_id === ''
+                                        }
+                                    >
+                                        <Save className="size-4" />
+                                        Simpan Jadwal
+                                    </Button>
+                                </>
+                            )}
+                        </div>
+                    </CardHeader>
+                    <CardContent className="space-y-4">
+                        <div className="flex flex-col gap-3 border-b pb-4">
+                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                                <div className="inline-flex rounded-lg bg-muted p-1 text-muted-foreground">
+                                    <button
+                                        type="button"
+                                        onClick={() => setActiveTab('matrix')}
+                                        className={cn(
+                                            'inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs sm:text-sm font-medium transition-all',
+                                            activeTab === 'matrix'
+                                                ? 'bg-background text-foreground shadow-sm font-semibold'
+                                                : 'hover:text-foreground',
+                                        )}
+                                    >
+                                        <Grid3X3 className="size-4" />
+                                        Matriks Horizontal (Semua Karyawan)
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => setActiveTab('vertical')}
+                                        className={cn(
+                                            'inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs sm:text-sm font-medium transition-all',
+                                            activeTab === 'vertical'
+                                                ? 'bg-background text-foreground shadow-sm font-semibold'
+                                                : 'hover:text-foreground',
+                                        )}
+                                    >
+                                        <List className="size-4" />
+                                        Input Per Karyawan (Vertikal)
+                                    </button>
+                                </div>
+
+                                {activeTab === 'matrix' && (
+                                    <div className="relative w-full sm:w-64">
+                                        <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
+                                        <Input
+                                            placeholder="Cari nama / NIK..."
+                                            value={matrixSearch}
+                                            onChange={(e) => setMatrixSearch(e.target.value)}
+                                            className="pl-9 h-9 text-xs sm:text-sm"
+                                        />
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className="flex flex-wrap items-center justify-between gap-3 bg-muted/40 rounded-lg p-2 border">
+                                <div className="flex flex-wrap items-center gap-2">
+                                    <span className="text-xs font-medium text-muted-foreground mr-1">
+                                        Rentang Tampilan:
+                                    </span>
+                                    <div className="inline-flex rounded-md bg-muted p-0.5 text-muted-foreground">
+                                        <button
+                                            type="button"
+                                            onClick={() => setViewPeriod('month')}
+                                            className={cn(
+                                                'inline-flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium transition-all',
+                                                viewPeriod === 'month'
+                                                    ? 'bg-background text-foreground shadow-xs font-semibold'
+                                                    : 'hover:text-foreground',
+                                            )}
+                                        >
+                                            <CalendarDays className="size-3.5" />
+                                            Per Bulan ({safeMatrixDays.length || 31} Hari)
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => setViewPeriod('week')}
+                                            className={cn(
+                                                'inline-flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium transition-all',
+                                                viewPeriod === 'week'
+                                                    ? 'bg-background text-foreground shadow-xs font-semibold'
+                                                    : 'hover:text-foreground',
+                                            )}
+                                        >
+                                            <CalendarRange className="size-3.5" />
+                                            Per Minggu
+                                        </button>
+                                    </div>
+
+                                    {viewPeriod === 'week' && weeks.length > 0 && (
+                                        <div className="flex items-center gap-1 ml-1 sm:ml-2">
+                                            <Button
+                                                type="button"
+                                                variant="outline"
+                                                size="icon"
+                                                className="size-7"
+                                                onClick={() => setSelectedWeekIndex((prev) => Math.max(0, prev - 1))}
+                                                disabled={selectedWeekIndex <= 0}
+                                                title="Minggu Sebelumnya"
+                                            >
+                                                <ChevronLeft className="size-3.5" />
+                                            </Button>
+
+                                            <Select
+                                                value={String(selectedWeekIndex)}
+                                                onValueChange={(val) => setSelectedWeekIndex(Number(val))}
+                                            >
+                                                <SelectTrigger className="h-7 text-xs min-w-[170px] bg-background">
+                                                    <SelectValue placeholder="Pilih minggu" />
+                                                </SelectTrigger>
+                                                <SelectContent>
+                                                    {weeks.map((w) => (
+                                                        <SelectItem key={w.index} value={String(w.index)} className="text-xs">
+                                                            {w.label}
+                                                        </SelectItem>
+                                                    ))}
+                                                </SelectContent>
+                                            </Select>
+
+                                            <Button
+                                                type="button"
+                                                variant="outline"
+                                                size="icon"
+                                                className="size-7"
+                                                onClick={() => setSelectedWeekIndex((prev) => Math.min(weeks.length - 1, prev + 1))}
+                                                disabled={selectedWeekIndex >= weeks.length - 1}
+                                                title="Minggu Berikutnya"
+                                            >
+                                                <ChevronRight className="size-3.5" />
+                                            </Button>
+                                        </div>
+                                    )}
+                                </div>
+
+                                {viewPeriod === 'week' && activeWeek && (
+                                    <div className="text-xs text-muted-foreground font-medium">
+                                        Menampilkan: <span className="text-foreground font-semibold">{activeWeek.label}</span> ({activeWeek.days.length} hari)
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+
+                        {holidays.length > 0 ? (
+                            <div className="rounded-lg border bg-muted/30 p-3">
+                                <div className="mb-2 flex items-center justify-between">
+                                    <div className="flex items-center gap-2 text-sm font-semibold">
+                                        <CalendarDays className="size-4 text-primary" />
+                                        Hari libur tersimpan bulan ini ({holidays.length})
+                                    </div>
+                                    <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="sm"
+                                        className="h-7 text-xs text-primary"
+                                        onClick={handleOpenCalendar}
+                                    >
+                                        Kelola Kalender
+                                    </Button>
+                                </div>
+                                <div className="flex flex-wrap gap-2">
+                                    {holidays.map((holiday) => {
+                                        const typeInfo = getHolidayTypeInfo(
+                                            holiday.holiday_type,
+                                            holiday.is_national_holiday,
+                                        );
+                                        return (
+                                            <span
+                                                key={holiday.id}
+                                                className="inline-flex items-center gap-1.5 rounded-full border bg-background px-3 py-1 text-xs"
+                                                title={holiday.name}
+                                            >
+                                                <span className="font-semibold">
+                                                    {holiday.date.slice(8, 10)}
+                                                </span>{' '}
+                                                - {holiday.name}
+                                                <span
+                                                    className={cn(
+                                                        'rounded px-1.5 py-0.5 border text-[10px] font-medium',
+                                                        typeInfo.badgeClass,
+                                                    )}
+                                                >
+                                                    {typeInfo.label}
+                                                </span>
+                                            </span>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        ) : null}
+
+                        {activeTab === 'matrix' ? (
+                            <div className="space-y-3">
+                                <div className="relative rounded-md border overflow-x-auto max-h-[680px]">
+                                    <table className="w-full border-collapse text-xs">
+                                        <thead className="sticky top-0 z-20 bg-muted border-b shadow-sm">
+                                            <tr>
+                                                <th className="sticky left-0 z-30 bg-muted px-3 py-2.5 text-left font-semibold border-r min-w-[190px] max-w-[220px]">
+                                                    Karyawan
+                                                </th>
+                                                <th
+                                                    className="px-2 py-2 text-center font-semibold border-r min-w-[50px] bg-muted"
+                                                    title={viewPeriod === 'week' ? "Total Hari Kerja Minggu Ini" : "Total Hari Kerja Bulan Ini"}
+                                                >
+                                                    {viewPeriod === 'week' ? 'Kerja (Mgg)' : 'Kerja'}
+                                                </th>
+                                                <th
+                                                    className="px-2 py-2 text-center font-semibold border-r min-w-[50px] bg-muted"
+                                                    title={viewPeriod === 'week' ? "Total Hari OFF Minggu Ini" : "Total Hari OFF Bulan Ini"}
+                                                >
+                                                    {viewPeriod === 'week' ? 'OFF (Mgg)' : 'OFF'}
+                                                </th>
+                                                {displayedMatrixDays.map((day) => {
+                                                    return (
+                                                        <th
+                                                            key={day.date}
+                                                            className={cn(
+                                                                'px-1.5 py-1 text-center border-r min-w-[42px] max-w-[46px]',
+                                                                day.is_sunday
+                                                                    ? 'bg-rose-100/70 text-rose-700 dark:bg-rose-950/50 dark:text-rose-300 font-bold'
+                                                                    : day.is_holiday
+                                                                    ? 'bg-amber-100/70 text-amber-700 dark:bg-amber-950/50 dark:text-amber-300 font-bold'
+                                                                    : 'bg-muted text-muted-foreground',
+                                                            )}
+                                                            title={
+                                                                day.is_holiday
+                                                                    ? `${day.date} (${day.holiday_name})`
+                                                                    : day.date
+                                                            }
+                                                        >
+                                                            <div className="text-[13px] leading-tight font-bold">
+                                                                {day.day}
+                                                            </div>
+                                                            <div className="text-[9px] uppercase font-medium opacity-80">
+                                                                {day.day_name}
+                                                            </div>
+                                                        </th>
+                                                    );
+                                                })}
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {filteredMatrixRows.length === 0 ? (
+                                                <tr>
+                                                    <td
+                                                        colSpan={
+                                                            displayedMatrixDays.length + 3
+                                                        }
+                                                        className="px-4 py-8 text-center text-muted-foreground"
+                                                    >
+                                                        Tidak ada data karyawan / jadwal ditemukan.
+                                                    </td>
+                                                </tr>
+                                            ) : (
+                                                filteredMatrixRows.map((row) => {
+                                                    const summary = getRowSummary(row);
+                                                    return (
+                                                        <tr
+                                                            key={row.employee_id}
+                                                            className="border-b hover:bg-muted/40 transition-colors"
+                                                        >
+                                                            <td className="sticky left-0 z-10 bg-background px-3 py-2 font-medium border-r shadow-[2px_0_4px_-2px_rgba(0,0,0,0.1)] max-w-[220px]">
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => {
+                                                                        setFilterState((prev) => ({
+                                                                            ...prev,
+                                                                            employee_id: String(
+                                                                                row.employee_id,
+                                                                            ),
+                                                                        }));
+                                                                        setActiveTab('vertical');
+                                                                        router.get(
+                                                                            schedulesIndex.url(),
+                                                                            {
+                                                                                month: filterState.month,
+                                                                                employee_id: String(
+                                                                                    row.employee_id,
+                                                                                ),
+                                                                            },
+                                                                            {
+                                                                                preserveState: true,
+                                                                                preserveScroll: true,
+                                                                                replace: true,
+                                                                            },
+                                                                        );
+                                                                    }}
+                                                                    className="text-left group block w-full truncate"
+                                                                    title="Klik untuk ubah jadwal karyawan ini"
+                                                                >
+                                                                    <div className="font-semibold text-foreground group-hover:text-primary group-hover:underline truncate text-xs">
+                                                                        {row.employee_name}
+                                                                    </div>
+                                                                    <div className="text-[10px] text-muted-foreground truncate">
+                                                                        {row.employee_code}
+                                                                    </div>
+                                                                </button>
+                                                            </td>
+                                                            <td className="px-2 py-1.5 text-center border-r font-semibold text-primary bg-primary/5">
+                                                                {summary.work}
+                                                            </td>
+                                                            <td className="px-2 py-1.5 text-center border-r font-semibold text-muted-foreground bg-muted/10">
+                                                                {summary.off}
+                                                            </td>
+                                                            {displayedMatrixDays.map((day) => {
+                                                                const sched = row.schedules?.[day.date];
+                                                                const shiftCode = sched?.shift_code || 'OFF';
+                                                                const isOff = sched?.is_day_off || shiftCode === 'OFF';
+                                                                const isWfa = Boolean(sched?.is_wfa) || shiftCode.includes('WFA');
+                                                                const isDayOffCol = day.is_sunday || day.is_holiday;
+
+                                                                return (
+                                                                    <td
+                                                                        key={day.date}
+                                                                        className={cn(
+                                                                            'px-1 py-1.5 text-center border-r transition-colors',
+                                                                            isDayOffCol && isOff
+                                                                                ? 'bg-rose-500/5 dark:bg-rose-950/20'
+                                                                                : '',
+                                                                        )}
+                                                                        title={`${row.employee_name} (${day.date})\nShift: ${shiftCode}${sched?.start_time ? ` (${sched.start_time} - ${sched.end_time})` : ''}${isWfa ? '\nStatus: WFA (Bebas Absensi)' : ''}${sched?.notes ? `\nCatatan: ${sched.notes}` : ''}`}
+                                                                    >
+                                                                        {isOff ? (
+                                                                            <span className="inline-block rounded px-1 py-0.5 text-[9px] font-medium text-muted-foreground/60 bg-muted/40">
+                                                                                OFF
+                                                                            </span>
+                                                                        ) : isWfa ? (
+                                                                            <span className="inline-block rounded px-1 py-0.5 text-[10px] font-bold text-indigo-700 bg-indigo-50 border border-indigo-200 dark:bg-indigo-950/60 dark:text-indigo-300 dark:border-indigo-800 hover:bg-indigo-100 cursor-default">
+                                                                                {shiftCode}
+                                                                            </span>
+                                                                        ) : (
+                                                                            <span className="inline-block rounded px-1 py-0.5 text-[10px] font-bold text-primary bg-primary/10 border border-primary/20 hover:bg-primary/20 cursor-default">
+                                                                                {shiftCode}
+                                                                            </span>
+                                                                        )}
+                                                                    </td>
+                                                                );
+                                                            })}
+                                                        </tr>
+                                                    );
+                                                })
+                                            )}
+                                        </tbody>
+                                    </table>
+                                </div>
+
+                                <div className="mt-2 flex flex-wrap items-center gap-2 pt-2 border-t text-xs text-muted-foreground">
+                                    <span className="font-semibold text-foreground">
+                                        Keterangan Shift:
+                                    </span>
+                                    {shifts.map((shift) => (
+                                        <span
+                                            key={shift.code}
+                                            className="inline-flex items-center gap-1 rounded bg-muted px-2 py-0.5 text-[11px]"
+                                        >
+                                            <span className="font-bold text-foreground">
+                                                {shift.code}
+                                            </span>
+                                            :{' '}
+                                            {shift.is_day_off
+                                                ? 'Libur'
+                                                : shift.is_wfa
+                                                  ? `${shift.start_time} - ${shift.end_time} (WFA)`
+                                                  : `${shift.start_time} - ${shift.end_time}`}
+                                        </span>
+                                    ))}
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="overflow-x-auto">
+                                <table className="w-full min-w-[980px] text-sm">
+                                    <thead>
+                                        <tr className="border-b text-left">
+                                            <th className="px-2 py-2">Tanggal</th>
+                                            <th className="px-2 py-2">Kode Shift</th>
+                                            <th className="px-2 py-2">Jam Masuk</th>
+                                            <th className="px-2 py-2">Jam Pulang</th>
+                                            <th className="px-2 py-2">Status</th>
+                                            <th className="px-2 py-2">Catatan</th>
+                                            <th className="px-2 py-2">Aksi</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {displayedScheduleRows.length === 0 && (
+                                            <tr>
+                                                <td
+                                                    colSpan={7}
+                                                    className="px-2 py-6 text-center text-muted-foreground"
+                                                >
+                                                    Tidak ada jadwal pada filter ini.
+                                                </td>
+                                            </tr>
+                                        )}
+                                        {displayedScheduleRows.map((row) => (
+                                            <tr key={row.date} className="border-b">
+                                                <td className="px-2 py-2">
+                                                    {row.label}
+                                                </td>
+                                                <td className="px-2 py-2">
+                                                    <SearchableSelect
+                                                        value={row.shift_code}
+                                                        onValueChange={(value) =>
+                                                            updateRowShift(row.date, value)
+                                                        }
+                                                        placeholder="Pilih shift"
+                                                        searchPlaceholder="Cari kode shift..."
+                                                        options={shiftOptions}
+                                                        className="min-w-[220px]"
+                                                    />
+                                                </td>
+                                                <td className="px-2 py-2">
+                                                    <Input
+                                                        value={row.start_time}
+                                                        readOnly
+                                                    />
+                                                </td>
+                                                <td className="px-2 py-2">
+                                                    <Input
+                                                        value={row.end_time}
+                                                        readOnly
+                                                    />
+                                                </td>
+                                                <td className="px-2 py-2 text-center">
+                                                    {row.is_day_off ? 'Day Off' : 'Kerja'}
+                                                </td>
+                                                <td className="px-2 py-2">
+                                                    <Input
+                                                        value={row.notes}
+                                                        onChange={(event) =>
+                                                            setScheduleRows((prev) =>
+                                                                prev.map((item) =>
+                                                                    item.date === row.date
+                                                                        ? {
+                                                                              ...item,
+                                                                              notes: event.target.value,
+                                                                          }
+                                                                        : item,
+                                                                ),
+                                                            )
+                                                        }
+                                                        placeholder="Opsional"
+                                                    />
+                                                </td>
+                                                <td className="px-2 py-2">
+                                                    {row.id ? (
+                                                        <ActionIconButton
+                                                            label="Hapus jam kerja"
+                                                            icon={Trash2}
+                                                            variant="destructive"
+                                                            onClick={() =>
+                                                                setDeletingSchedule(row)
+                                                            }
+                                                        />
+                                                    ) : (
+                                                        <span className="text-xs text-muted-foreground">
+                                                            Belum disimpan
+                                                        </span>
+                                                    )}
+                                                </td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
+                    </CardContent>
+                </Card>
+            </div>
+
+            <Dialog
+                open={shiftListDialogOpen}
+                onOpenChange={setShiftListDialogOpen}
+            >
+                <DialogContent className="sm:max-w-4xl">
+                    <DialogHeader>
+                        <DialogTitle>Daftar Shift Tersedia</DialogTitle>
+                        <DialogDescription>
+                            Kelola master shift. Shift hanya bisa dihapus jika
+                            belum dipakai pada jadwal, absensi, atau request
+                            perubahan jadwal.
+                        </DialogDescription>
+                    </DialogHeader>
+
+                    <div className="flex justify-end">
+                        <Button type="button" onClick={openShiftDialog}>
+                            <Plus className="size-4" />
+                            Tambah Shift
+                        </Button>
+                    </div>
+
+                    <div className="overflow-x-auto">
+                        <table className="w-full min-w-[760px] text-sm">
+                            <thead>
+                                <tr className="border-b text-left">
+                                    <th className="px-2 py-2">Kode</th>
+                                    <th className="px-2 py-2">Nama</th>
+                                    <th className="px-2 py-2">Jam Kerja</th>
+                                    <th className="px-2 py-2">Status</th>
+                                    <th className="px-2 py-2">Aksi</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {shifts.map((shift) => (
+                                    <tr key={shift.id} className="border-b">
+                                        <td className="px-2 py-2 font-medium">
+                                            {shift.code}
+                                        </td>
+                                        <td className="px-2 py-2">
+                                            {shift.name}
+                                        </td>
+                                        <td className="px-2 py-2">
+                                            <div>
+                                                {formatShiftTime(shift)}
+                                                {!shift.is_day_off && (
+                                                    <div className="text-xs text-muted-foreground">
+                                                        Toleransi telat{' '}
+                                                        {
+                                                            shift.late_tolerance_minutes
+                                                        }{' '}
+                                                        menit
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </td>
+                                        <td className="px-2 py-2">
+                                            {shift.is_day_off ? (
+                                                <span className="text-muted-foreground text-xs">Day Off</span>
+                                            ) : shift.is_wfa ? (
+                                                <span className="inline-flex items-center rounded px-2 py-0.5 text-xs font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200 dark:bg-indigo-950/50 dark:text-indigo-300 dark:border-indigo-800">
+                                                    WFA
+                                                </span>
+                                            ) : (
+                                                <span className="inline-flex items-center rounded px-2 py-0.5 text-xs font-medium bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-950/50 dark:text-emerald-300 dark:border-emerald-800">
+                                                    Aktif
+                                                </span>
+                                            )}
+                                        </td>
+                                        <td className="px-2 py-2">
+                                            {shift.is_day_off ? (
+                                                <span className="text-xs text-muted-foreground">
+                                                    Bawaan sistem
+                                                </span>
+                                            ) : (
+                                                <div className="flex gap-1.5">
+                                                    <ActionIconButton
+                                                        label="Ubah shift"
+                                                        icon={Pencil}
+                                                        variant="outline"
+                                                        onClick={() =>
+                                                            openEditShiftDialog(
+                                                                shift,
+                                                            )
+                                                        }
+                                                    />
+                                                    <ActionIconButton
+                                                        label="Hapus shift"
+                                                        icon={Trash2}
+                                                        variant="destructive"
+                                                        onClick={() =>
+                                                            setDeletingShift(
+                                                                shift,
+                                                            )
+                                                        }
+                                                    />
+                                                </div>
+                                            )}
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                </DialogContent>
+            </Dialog>
+
+            <Dialog
+                open={shiftDialogOpen}
+                onOpenChange={(open) => {
+                    setShiftDialogOpen(open);
+                    if (!open) {
+                        shiftForm.clearErrors();
+                        setEditingShift(null);
+                    }
+                }}
+            >
+                <DialogContent className="sm:max-w-lg">
+                    <DialogHeader>
+                        <DialogTitle>
+                            {editingShift ? 'Ubah Shift' : 'Tambah Shift'}
+                        </DialogTitle>
+                        <DialogDescription>
+                            {editingShift
+                                ? 'Perubahan nama dan jam shift akan dipakai untuk pilihan jadwal berikutnya.'
+                                : 'Kode shift akan dibuat otomatis dari jam mulai dan jam selesai.'}
+                        </DialogDescription>
+                    </DialogHeader>
+
+                    <div className="grid gap-4 md:grid-cols-2">
+                        <div className="grid gap-2 md:col-span-2">
+                            <Label htmlFor="shift_name">Nama Shift</Label>
+                            <Input
+                                id="shift_name"
+                                value={shiftForm.data.name}
+                                onChange={(event) =>
+                                    shiftForm.setData(
+                                        'name',
+                                        event.target.value,
+                                    )
+                                }
+                                placeholder={
+                                    editingShift?.code ?? shiftPreviewCode
+                                }
+                            />
+                            <InputError message={shiftForm.errors.name} />
+                        </div>
+
+                        <div className="grid gap-2">
+                            <Label htmlFor="shift_start_time">Jam Mulai</Label>
+                            <Input
+                                id="shift_start_time"
+                                type="time"
+                                value={shiftForm.data.start_time}
+                                onChange={(event) =>
+                                    shiftForm.setData(
+                                        'start_time',
+                                        event.target.value,
+                                    )
+                                }
+                            />
+                            <InputError message={shiftForm.errors.start_time} />
+                        </div>
+
+                        <div className="grid gap-2">
+                            <Label htmlFor="shift_end_time">Jam Selesai</Label>
+                            <Input
+                                id="shift_end_time"
+                                type="time"
+                                value={shiftForm.data.end_time}
+                                onChange={(event) =>
+                                    shiftForm.setData(
+                                        'end_time',
+                                        event.target.value,
+                                    )
+                                }
+                            />
+                            <InputError message={shiftForm.errors.end_time} />
+                        </div>
+
+                        <div className="grid gap-2 md:col-span-2">
+                            <Label htmlFor="shift_late_tolerance">
+                                Toleransi Keterlambatan (menit)
+                            </Label>
+                            <Input
+                                id="shift_late_tolerance"
+                                type="number"
+                                min="0"
+                                max="180"
+                                value={shiftForm.data.late_tolerance_minutes}
+                                onChange={(event) =>
+                                    shiftForm.setData(
+                                        'late_tolerance_minutes',
+                                        Number(event.target.value),
+                                    )
+                                }
+                            />
+                            <InputError
+                                message={
+                                    shiftForm.errors.late_tolerance_minutes
+                                }
+                            />
+                        </div>
+
+                        <div className="flex items-start space-x-2.5 rounded-lg border p-3 bg-muted/20 md:col-span-2">
+                            <Checkbox
+                                id="shift_is_wfa"
+                                checked={shiftForm.data.is_wfa}
+                                onCheckedChange={(checked) =>
+                                    shiftForm.setData('is_wfa', Boolean(checked))
+                                }
+                                className="mt-0.5"
+                            />
+                            <div className="grid gap-1 leading-none">
+                                <Label htmlFor="shift_is_wfa" className="cursor-pointer font-medium">
+                                    Shift WFA (Kerja Fleksibel / Bebas Absensi)
+                                </Label>
+                                <p className="text-xs text-muted-foreground">
+                                    Karyawan pada shift ini tidak diwajibkan melakukan absensi dan tidak terkena potongan kehadiran atau denda keterlambatan.
+                                </p>
+                            </div>
+                        </div>
+
+                        <div className="grid gap-2 md:col-span-2">
+                            <Label htmlFor="shift_preview_code">
+                                {editingShift
+                                    ? 'Kode Shift'
+                                    : 'Preview Kode Shift'}
+                            </Label>
+                            <Input
+                                id="shift_preview_code"
+                                value={editingShift?.code ?? shiftPreviewCode}
+                                readOnly
+                                className="font-medium"
+                            />
+                        </div>
+                    </div>
+
+                    <div className="flex justify-end gap-2">
+                        <Button
+                            type="button"
+                            variant="outline"
+                            onClick={() => {
+                                setShiftDialogOpen(false);
+                                setEditingShift(null);
+                            }}
+                        >
+                            Batal
+                        </Button>
+                        <Button
+                            type="button"
+                            onClick={saveShift}
+                            disabled={shiftForm.processing}
+                        >
+                            <Save className="size-4" />
+                            {editingShift ? 'Simpan Perubahan' : 'Simpan Shift'}
+                        </Button>
+                    </div>
+                </DialogContent>
+            </Dialog>
+
+            <Dialog
+                open={deletingSchedule !== null}
+                onOpenChange={(open) => !open && setDeletingSchedule(null)}
+            >
+                <DialogContent className="sm:max-w-md">
+                    <DialogHeader>
+                        <DialogTitle>Hapus Jam Kerja</DialogTitle>
+                        <DialogDescription>
+                            Data jadwal kerja pada tanggal ini akan dihapus dari
+                            portal admin.
+                        </DialogDescription>
+                    </DialogHeader>
+
+                    <div className="rounded-lg border bg-muted/40 p-3 text-sm">
+                        <p className="font-medium">
+                            {deletingSchedule?.label ?? '-'}
+                        </p>
+                        <p className="mt-1 text-muted-foreground">
+                            {deletingSchedule
+                                ? `${deletingSchedule.shift_code} - ${
+                                      deletingSchedule.is_day_off
+                                          ? 'Day Off'
+                                          : `${deletingSchedule.start_time} - ${deletingSchedule.end_time}`
+                                  }`
+                                : '-'}
+                        </p>
+                    </div>
+
+                    <div className="flex justify-end gap-2">
+                        <Button
+                            type="button"
+                            variant="outline"
+                            onClick={() => setDeletingSchedule(null)}
+                        >
+                            Batal
+                        </Button>
+                        <Button
+                            type="button"
+                            variant="destructive"
+                            onClick={deleteSchedule}
+                        >
+                            <Trash2 className="size-4" />
+                            Hapus Jam Kerja
+                        </Button>
+                    </div>
+                </DialogContent>
+            </Dialog>
+
+            <Dialog
+                open={deletingShift !== null}
+                onOpenChange={(open) => !open && setDeletingShift(null)}
+            >
+                <DialogContent className="sm:max-w-md">
+                    <DialogHeader>
+                        <DialogTitle>Hapus Shift</DialogTitle>
+                        <DialogDescription>
+                            Shift hanya bisa dihapus jika belum dipakai pada
+                            jadwal, absensi, atau request perubahan jadwal.
+                        </DialogDescription>
+                    </DialogHeader>
+
+                    <div className="rounded-lg border bg-muted/40 p-3 text-sm">
+                        <p className="font-medium">
+                            {deletingShift
+                                ? `${deletingShift.code} - ${deletingShift.name}`
+                                : '-'}
+                        </p>
+                        <p className="mt-1 text-muted-foreground">
+                            {deletingShift
+                                ? formatShiftTime(deletingShift)
+                                : '-'}
+                        </p>
+                    </div>
+
+                    <div className="flex justify-end gap-2">
+                        <Button
+                            type="button"
+                            variant="outline"
+                            onClick={() => setDeletingShift(null)}
+                        >
+                            Batal
+                        </Button>
+                        <Button
+                            type="button"
+                            variant="destructive"
+                            onClick={deleteShift}
+                        >
+                            <Trash2 className="size-4" />
+                            Hapus Shift
+                        </Button>
+                    </div>
+                </DialogContent>
+            </Dialog>
+
+            <Dialog
+                open={rosterDialogOpen}
+                onOpenChange={(open) => {
+                    setRosterDialogOpen(open);
+                    if (!open) {
+                        rosterForm.clearErrors();
+                    }
+                }}
+            >
+                <DialogContent className="sm:max-w-2xl">
+                    <DialogHeader>
+                        <DialogTitle>Roster Shift Otomatis</DialogTitle>
+                        <DialogDescription>
+                            Generate jadwal berdasarkan pola kode shift. Contoh:{' '}
+                            `{rosterPatternPlaceholder}`.
+                        </DialogDescription>
+                    </DialogHeader>
+
+                    {Object.keys(rosterForm.errors).length > 0 ? (
+                        <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                            {Object.values(rosterForm.errors)[0]}
+                        </div>
+                    ) : null}
+
+                    <div className="grid gap-4 md:grid-cols-2">
+                        <div className="grid gap-2 md:col-span-2">
+                            <Label htmlFor="roster_apply_scope">
+                                Terapkan Jadwal
+                            </Label>
+                            <Select
+                                value={rosterForm.data.apply_scope}
+                                onValueChange={(value) =>
+                                    updateRosterScope(
+                                        value as RosterFormData['apply_scope'],
+                                    )
+                                }
+                            >
+                                <SelectTrigger
+                                    id="roster_apply_scope"
+                                    className="w-full"
+                                >
+                                    <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                    <SelectItem value="single">
+                                        Ke karyawan ini
+                                    </SelectItem>
+                                    <SelectItem value="selected">
+                                        Ke karyawan lain
+                                    </SelectItem>
+                                    <SelectItem value="all">
+                                        Ke seluruh karyawan
+                                    </SelectItem>
+                                </SelectContent>
+                            </Select>
+                            <InputError
+                                message={rosterForm.errors.apply_scope}
+                            />
+                        </div>
+
+                        {rosterForm.data.apply_scope === 'single' ? (
+                            <div className="grid gap-2 md:col-span-2">
+                                <Label htmlFor="roster_employee">
+                                    Karyawan
+                                </Label>
+                                <SearchableSelect
+                                    id="roster_employee"
+                                    value={
+                                        rosterForm.data.employee_id === ''
+                                            ? '__none'
+                                             : rosterForm.data.employee_id
+                                    }
+                                    onValueChange={(value) =>
+                                        rosterForm.setData(
+                                            'employee_id',
+                                            value === '__none' ? '' : value,
+                                        )
+                                    }
+                                    placeholder="Pilih karyawan"
+                                    searchPlaceholder="Cari karyawan..."
+                                    options={[
+                                        { value: '__none', label: '-' },
+                                        ...employees.map((employee) => ({
+                                            value: String(employee.id),
+                                            label: employee.label,
+                                        })),
+                                    ]}
+                                    className="w-full"
+                                />
+                                <InputError
+                                    message={rosterForm.errors.employee_id}
+                                />
+                            </div>
+                        ) : null}
+
+                        {rosterForm.data.apply_scope === 'selected' ? (
+                            <div className="grid gap-2 md:col-span-2">
+                                <Label>Karyawan Tujuan</Label>
+                                <div className="max-h-56 overflow-y-auto rounded-md border p-2">
+                                    <div className="grid gap-2 sm:grid-cols-2">
+                                        {employees.map((employee) => {
+                                            const employeeId = String(
+                                                employee.id,
+                                            );
+
+                                            return (
+                                                <label
+                                                    key={employee.id}
+                                                    className="flex min-h-9 items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-muted/60"
+                                                >
+                                                    <Checkbox
+                                                        checked={rosterForm.data.target_employee_ids.includes(
+                                                            employeeId,
+                                                        )}
+                                                        onCheckedChange={() =>
+                                                            toggleRosterTargetEmployee(
+                                                                employeeId,
+                                                            )
+                                                        }
+                                                    />
+                                                    <span className="truncate">
+                                                        {employee.label}
+                                                    </span>
+                                                </label>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+                                <InputError
+                                    message={
+                                        rosterForm.errors.target_employee_ids ||
+                                        Object.entries(rosterForm.errors).find(
+                                            ([key]) =>
+                                                key.startsWith(
+                                                    'target_employee_ids.',
+                                                ),
+                                        )?.[1]
+                                    }
+                                />
+                            </div>
+                        ) : null}
+
+                        {rosterForm.data.apply_scope === 'all' ? (
+                            <div className="rounded-md border bg-muted/30 p-3 text-sm md:col-span-2">
+                                Roster akan diterapkan ke {employees.length}{' '}
+                                karyawan.
+                            </div>
+                        ) : null}
+
+                        <div className="grid gap-2 md:col-span-2">
+                            <Label htmlFor="pattern_text">Pola Shift</Label>
+                            <Input
+                                id="pattern_text"
+                                value={rosterForm.data.pattern_text}
+                                onChange={(event) =>
+                                    rosterForm.setData(
+                                        'pattern_text',
+                                        event.target.value,
+                                    )
+                                }
+                            />
+                            <p className="text-xs text-muted-foreground">
+                                Shift tersedia:{' '}
+                                {shifts.map((shift) => shift.code).join(', ')}
+                            </p>
+                            <InputError
+                                message={
+                                    rosterForm.errors.pattern ||
+                                    Object.entries(rosterForm.errors).find(
+                                        ([key]) => key.startsWith('pattern.'),
+                                    )?.[1]
+                                }
+                            />
+                        </div>
+
+                        <div className="grid gap-2">
+                            <Label htmlFor="start_date">Tanggal Mulai</Label>
+                            <Input
+                                id="start_date"
+                                type="date"
+                                value={rosterForm.data.start_date}
+                                onChange={(event) =>
+                                    rosterForm.setData(
+                                        'start_date',
+                                        event.target.value,
+                                    )
+                                }
+                            />
+                            <InputError
+                                message={rosterForm.errors.start_date}
+                            />
+                        </div>
+
+                        <div className="grid gap-2">
+                            <Label htmlFor="end_date">Tanggal Selesai</Label>
+                            <Input
+                                id="end_date"
+                                type="date"
+                                value={rosterForm.data.end_date}
+                                onChange={(event) =>
+                                    rosterForm.setData(
+                                        'end_date',
+                                        event.target.value,
+                                    )
+                                }
+                            />
+                            <InputError message={rosterForm.errors.end_date} />
+                        </div>
+                    </div>
+
+                    <div className="flex justify-end gap-2">
+                        <Button
+                            type="button"
+                            variant="outline"
+                            onClick={() => setRosterDialogOpen(false)}
+                        >
+                            Batal
+                        </Button>
+                        <Button
+                            type="button"
+                            onClick={applyRoster}
+                            disabled={rosterForm.processing}
+                        >
+                            <WandSparkles className="size-4" />
+                            Terapkan Roster
+                        </Button>
+                    </div>
+                </DialogContent>
+            </Dialog>
+
+            <Dialog
+                open={quickDialogOpen}
+                onOpenChange={(open) => {
+                    setQuickDialogOpen(open);
+                    if (!open) {
+                        quickScheduleForm.clearErrors();
+                    }
+                }}
+            >
+                <DialogContent className="sm:max-w-2xl">
+                    <DialogHeader>
+                        <DialogTitle>Tambah Jam Kerja</DialogTitle>
+                        <DialogDescription>
+                            Tambahkan satu entri jadwal dengan memilih shift
+                            yang sudah tersedia.
+                        </DialogDescription>
+                    </DialogHeader>
+
+                    <div className="grid gap-4 md:grid-cols-2">
+                        <div className="grid gap-2 md:col-span-2">
+                            <Label htmlFor="quick_employee">Karyawan</Label>
+                            <SearchableSelect
+                                id="quick_employee"
+                                value={
+                                    quickScheduleForm.data.employee_id === ''
+                                        ? '__none'
+                                        : quickScheduleForm.data.employee_id
+                                }
+                                onValueChange={(value) =>
+                                    quickScheduleForm.setData(
+                                        'employee_id',
+                                        value === '__none' ? '' : value,
+                                    )
+                                }
+                                placeholder="Pilih karyawan"
+                                searchPlaceholder="Cari karyawan..."
+                                options={[
+                                    { value: '__none', label: '-' },
+                                    ...employees.map((employee) => ({
+                                        value: String(employee.id),
+                                        label: employee.label,
+                                    })),
+                                ]}
+                                className="w-full"
+                            />
+                            <InputError
+                                message={quickScheduleForm.errors.employee_id}
+                            />
+                        </div>
+
+                        <div className="grid gap-2">
+                            <Label htmlFor="quick_work_date">Tanggal</Label>
+                            <Input
+                                id="quick_work_date"
+                                type="date"
+                                value={quickScheduleForm.data.work_date}
+                                onChange={(event) =>
+                                    quickScheduleForm.setData(
+                                        'work_date',
+                                        event.target.value,
+                                    )
+                                }
+                            />
+                        </div>
+
+                        <div className="grid gap-2">
+                            <Label htmlFor="quick_shift_code">Kode Shift</Label>
+                            <SearchableSelect
+                                id="quick_shift_code"
+                                value={quickScheduleForm.data.shift_code}
+                                onValueChange={(value) =>
+                                    quickScheduleForm.setData(
+                                        'shift_code',
+                                        value,
+                                    )
+                                }
+                                placeholder="Pilih shift"
+                                searchPlaceholder="Cari shift..."
+                                options={shiftOptions}
+                                className="w-full"
+                            />
+                            <InputError
+                                message={quickScheduleForm.errors.shift_code}
+                            />
+                        </div>
+
+                        <div className="grid gap-2">
+                            <Label>Jam Masuk</Label>
+                            <Input
+                                value={quickShift?.start_time ?? ''}
+                                readOnly
+                            />
+                        </div>
+
+                        <div className="grid gap-2">
+                            <Label>Jam Pulang</Label>
+                            <Input
+                                value={quickShift?.end_time ?? ''}
+                                readOnly
+                            />
+                        </div>
+
+                        <div className="grid gap-2 md:col-span-2">
+                            <Label>Status Shift</Label>
+                            <Input
+                                value={
+                                    quickShift?.is_day_off
+                                        ? 'Day Off'
+                                        : 'Hari Kerja'
+                                }
+                                readOnly
+                            />
+                        </div>
+
+                        <div className="grid gap-2 md:col-span-2">
+                            <Label htmlFor="quick_notes">Catatan</Label>
+                            <Input
+                                id="quick_notes"
+                                value={quickScheduleForm.data.notes}
+                                onChange={(event) =>
+                                    quickScheduleForm.setData(
+                                        'notes',
+                                        event.target.value,
+                                    )
+                                }
+                                placeholder="Opsional"
+                            />
+                        </div>
+                    </div>
+
+                    <div className="flex justify-end gap-2">
+                        <Button
+                            type="button"
+                            variant="outline"
+                            onClick={() => setQuickDialogOpen(false)}
+                        >
+                            Batal
+                        </Button>
+                        <Button
+                            type="button"
+                            onClick={saveQuickSchedule}
+                            disabled={quickScheduleForm.processing}
+                        >
+                            <Save className="size-4" />
+                            Simpan Jam Kerja
+                        </Button>
+                    </div>
+                </DialogContent>
+            </Dialog>
+            <Dialog
+                open={importDialogOpen}
+                onOpenChange={(open) => {
+                    setImportDialogOpen(open);
+                    if (open) {
+                        importForm.setData('month', filterState.month);
+                    } else {
+                        importForm.clearErrors();
+                    }
+                }}
+            >
+                <DialogContent>
+                    <DialogHeader>
+                        <DialogTitle>Import Jadwal</DialogTitle>
+                        <DialogDescription>
+                            Download template dan isi jadwal karyawan untuk
+                            bulan {filterState.month}. Pastikan kode shift sesuai dengan daftar shift yang tersedia.
+                        </DialogDescription>
+                    </DialogHeader>
+                    <form onSubmit={submitImport} className="grid gap-4 py-4">
+                        <div className="flex flex-col gap-3">
+                            <Button
+                                type="button"
+                                variant="outline"
+                                onClick={downloadTemplate}
+                                className="w-full"
+                            >
+                                <Download className="mr-2 size-4" />
+                                Download Template
+                            </Button>
+                        </div>
+                        <div className="grid gap-2">
+                            <Label htmlFor="file_import">File Excel</Label>
+                            <Input
+                                id="file_import"
+                                type="file"
+                                accept=".xlsx,.xls,.csv"
+                                onChange={(e) =>
+                                    importForm.setData(
+                                        'file',
+                                        e.target.files?.[0] ?? null,
+                                    )
+                                }
+                            />
+                            <InputError message={importForm.errors.file || importForm.errors.month} />
+                        </div>
+                        <div className="flex justify-end gap-2">
+                            <Button
+                                type="button"
+                                variant="outline"
+                                onClick={() => setImportDialogOpen(false)}
+                            >
+                                Batal
+                            </Button>
+                            <Button
+                                type="submit"
+                                disabled={
+                                    importForm.processing ||
+                                    !importForm.data.file
+                                }
+                            >
+                                <Upload className="mr-2 size-4" />
+                                Import
+                            </Button>
+                        </div>
+                    </form>
+                </DialogContent>
+            </Dialog>
+
+            <Dialog open={calendarDialogOpen} onOpenChange={setCalendarDialogOpen}>
+                <DialogContent className="flex flex-col max-h-[85vh] sm:max-w-4xl p-0 gap-0 overflow-hidden">
+                    <DialogHeader className="p-5 sm:p-6 pb-4 border-b shrink-0 pr-12 bg-background">
+                        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                            <div>
+                                <DialogTitle className="flex items-center gap-2 text-base font-semibold">
+                                    <CalendarDays className="size-5 text-primary" />
+                                    Kalender Kerja & Hari Libur
+                                </DialogTitle>
+                                <DialogDescription className="text-xs text-muted-foreground mt-0.5">
+                                    Kelola hari libur nasional, cuti bersama, dan libur perusahaan tahun {currentActiveYear}.
+                                </DialogDescription>
+                            </div>
+                            <div className="flex items-center gap-2 shrink-0">
+                                <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={syncHolidays}
+                                    disabled={isSyncingHolidays}
+                                    className="h-8 gap-1.5 text-xs font-medium cursor-pointer"
+                                >
+                                    <RefreshCcw className={cn("size-3.5 text-primary", isSyncingHolidays && "animate-spin")} />
+                                    {isSyncingHolidays ? "Menyinkronkan..." : "Sync API Hari Libur"}
+                                </Button>
+                            </div>
+                        </div>
+                    </DialogHeader>
+
+                    <div className="flex-1 overflow-y-auto p-5 sm:p-6 space-y-6">
+                        <form onSubmit={handleSaveHoliday} className="space-y-4 rounded-lg border bg-muted/20 p-4">
+                            <div className="text-sm font-semibold text-foreground">
+                                Tambah Hari Libur
+                            </div>
+                            <div className="grid gap-3 sm:grid-cols-3">
+                                <div className="space-y-1.5">
+                                    <Label htmlFor="holiday-date">Tanggal</Label>
+                                    <Input
+                                        id="holiday-date"
+                                        type="date"
+                                        value={holidayFormData.date}
+                                        onChange={(e) =>
+                                            setHolidayFormData((prev) => ({
+                                                ...prev,
+                                                date: e.target.value,
+                                            }))
+                                        }
+                                        required
+                                    />
+                                </div>
+                                <div className="space-y-1.5">
+                                    <Label htmlFor="holiday-type">Jenis Libur</Label>
+                                    <Select
+                                        value={holidayFormData.holiday_type}
+                                        onValueChange={(value) =>
+                                            setHolidayFormData((prev) => ({
+                                                ...prev,
+                                                holiday_type: value,
+                                            }))
+                                        }
+                                    >
+                                        <SelectTrigger id="holiday-type">
+                                            <SelectValue placeholder="Pilih jenis libur" />
+                                        </SelectTrigger>
+                                        <SelectContent>
+                                            <SelectItem value="national">Libur Nasional</SelectItem>
+                                            <SelectItem value="joint_leave">Cuti Bersama</SelectItem>
+                                            <SelectItem value="company">Libur Perusahaan</SelectItem>
+                                            <SelectItem value="other">Lainnya</SelectItem>
+                                        </SelectContent>
+                                    </Select>
+                                </div>
+                                <div className="space-y-1.5 sm:col-span-1">
+                                    <Label htmlFor="holiday-name">Nama Hari Libur</Label>
+                                    <Input
+                                        id="holiday-name"
+                                        placeholder="cth: Idul Fitri, HUT Perusahaan"
+                                        value={holidayFormData.name}
+                                        onChange={(e) =>
+                                            setHolidayFormData((prev) => ({
+                                                ...prev,
+                                                name: e.target.value,
+                                            }))
+                                        }
+                                        required
+                                    />
+                                </div>
+                            </div>
+
+                            <div className="flex flex-col gap-3 pt-1 sm:flex-row sm:items-center sm:justify-between">
+                                <div className="flex items-center space-x-2">
+                                    <Checkbox
+                                        id="apply-to-schedule"
+                                        checked={holidayFormData.apply_to_schedule}
+                                        onCheckedChange={(checked) =>
+                                            setHolidayFormData((prev) => ({
+                                                ...prev,
+                                                apply_to_schedule: Boolean(checked),
+                                            }))
+                                        }
+                                    />
+                                    <Label
+                                        htmlFor="apply-to-schedule"
+                                        className="cursor-pointer text-xs font-normal text-muted-foreground"
+                                    >
+                                        Terapkan libur ke seluruh karyawan aktif (jadwal diset OFF)
+                                    </Label>
+                                </div>
+                                <Button
+                                    type="submit"
+                                    size="sm"
+                                    disabled={
+                                        isSubmittingHoliday ||
+                                        !holidayFormData.name.trim() ||
+                                        !holidayFormData.date
+                                    }
+                                >
+                                    <Plus className="mr-1.5 size-4" />
+                                    Simpan Hari Libur
+                                </Button>
+                            </div>
+                        </form>
+
+                        <div className="space-y-3">
+                            <div className="flex flex-col gap-2.5 sm:flex-row sm:items-center sm:justify-between">
+                                <div>
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-sm font-semibold">
+                                            Daftar Hari Libur Tahun {currentActiveYear}
+                                        </span>
+                                        <span className="inline-flex items-center rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
+                                            {displayYearHolidays.length} hari
+                                        </span>
+                                    </div>
+                                    <p className="text-xs text-muted-foreground mt-0.5">
+                                        Menampilkan seluruh hari libur nasional & cuti bersama selama tahun {currentActiveYear}.
+                                    </p>
+                                </div>
+                                <div className="inline-flex rounded-lg border bg-muted/40 p-0.5 text-xs self-start sm:self-auto">
+                                    <button
+                                        type="button"
+                                        onClick={() => setHolidayPopupFilter('all')}
+                                        className={cn(
+                                            'rounded-md px-2.5 py-1 font-medium transition-colors cursor-pointer',
+                                            holidayPopupFilter === 'all'
+                                                ? 'bg-background text-foreground shadow-xs'
+                                                : 'text-muted-foreground hover:text-foreground'
+                                        )}
+                                    >
+                                        Semua ({activeYearHolidays.length})
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => setHolidayPopupFilter('month')}
+                                        className={cn(
+                                            'rounded-md px-2.5 py-1 font-medium transition-colors cursor-pointer',
+                                            holidayPopupFilter === 'month'
+                                                ? 'bg-background text-foreground shadow-xs'
+                                                : 'text-muted-foreground hover:text-foreground'
+                                        )}
+                                    >
+                                        Bulan {filterState.month || '-'} ({holidays.length})
+                                    </button>
+                                </div>
+                            </div>
+
+                            {displayYearHolidays.length === 0 ? (
+                                <div className="rounded-lg border border-dashed p-8 text-center text-xs text-muted-foreground">
+                                    Belum ada data hari libur pada tahun {currentActiveYear}. Silakan tambah hari libur melalui form di atas atau lakukan sinkronisasi API.
+                                </div>
+                            ) : (
+                                <div className="overflow-x-auto rounded-md border">
+                                    <table className="w-full text-left text-xs">
+                                        <thead className="sticky top-0 border-b bg-muted/95 text-muted-foreground backdrop-blur-xs z-10">
+                                            <tr>
+                                                <th className="px-3 py-2.5 font-medium">Tanggal</th>
+                                                <th className="px-3 py-2.5 font-medium">Hari Libur</th>
+                                                <th className="px-3 py-2.5 font-medium">Jenis Libur</th>
+                                                <th className="px-3 py-2.5 text-right font-medium">Aksi</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y">
+                                            {displayYearHolidays.map((h) => {
+                                                const typeInfo = getHolidayTypeInfo(h.holiday_type, h.is_national_holiday);
+                                                const isCurrentMonth = filterState.month && h.date.startsWith(filterState.month);
+                                                return (
+                                                    <tr
+                                                        key={h.id}
+                                                        className={cn(
+                                                            'hover:bg-muted/30 transition-colors',
+                                                            isCurrentMonth && 'bg-primary/5'
+                                                        )}
+                                                    >
+                                                        <td className="px-3 py-2.5 font-medium whitespace-nowrap">
+                                                            <div className="flex items-center gap-1.5">
+                                                                <span>{formatDeviceDate(h.date)}</span>
+                                                                {isCurrentMonth && (
+                                                                    <span className="rounded bg-primary/10 px-1 py-0.5 text-[10px] font-medium text-primary">
+                                                                        Bulan ini
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                        </td>
+                                                        <td className="px-3 py-2.5 font-medium text-foreground">
+                                                            {h.name}
+                                                        </td>
+                                                        <td className="px-3 py-2.5 whitespace-nowrap">
+                                                            <span className={cn('inline-flex rounded px-2 py-0.5 border text-[10px] font-medium', typeInfo.badgeClass)}>
+                                                                {typeInfo.label}
+                                                            </span>
+                                                        </td>
+                                                        <td className="px-3 py-2.5 text-right whitespace-nowrap">
+                                                            <ActionIconButton
+                                                                label="Hapus hari libur"
+                                                                icon={Trash2}
+                                                                variant="destructive"
+                                                                disabled={deletingHolidayId === h.id}
+                                                                onClick={() => handleDeleteHoliday(h)}
+                                                            />
+                                                        </td>
+                                                    </tr>
+                                                );
+                                            })}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </DialogContent>
+            </Dialog>
+        </AppLayout>
+    );
+}

@@ -1,0 +1,282 @@
+<?php
+
+namespace App\Http\Controllers\Api\Mobile\V1;
+
+use App\Http\Controllers\Api\Concerns\InteractsWithMobileApiResponse;
+use App\Http\Controllers\Api\Mobile\V1\Concerns\InteractsWithSelfService;
+use App\Http\Controllers\Controller;
+use App\Models\CompanySetting;
+use App\Models\EmployeeBankAccount;
+use App\Models\FcmDeviceToken;
+use App\Models\User;
+use App\Services\EmployeeProfileCompletionService;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Storage;
+
+class ProfileController extends Controller
+{
+    use InteractsWithMobileApiResponse, InteractsWithSelfService;
+
+    /**
+     * Get employee profile data (untuk form prefill).
+     */
+    public function show(Request $request, EmployeeProfileCompletionService $completionService): JsonResponse
+    {
+        /** @var User $user */
+        $user = $request->user();
+        $employee = $this->resolveRequiredSelfServiceEmployee($user);
+
+        $bankAccounts = EmployeeBankAccount::query()
+            ->where('employee_id', $employee->id)
+            ->get(['id', 'bank_name', 'account_number', 'account_holder_name', 'is_primary']);
+
+        return $this->success([
+            'employee' => [
+                'id' => $employee->id,
+                'employee_code' => $employee->employee_code,
+                'first_name' => $employee->first_name,
+                'last_name' => $employee->last_name,
+                'full_name' => $employee->full_name,
+                'phone' => $employee->phone,
+                'address' => $employee->address,
+                'email' => $employee->email,
+                'gender' => $employee->gender,
+                'birth_date' => $employee->birth_date?->format('Y-m-d'),
+                'last_education' => $employee->last_education,
+                'marital_status' => $employee->marital_status,
+                'children_count' => $employee->children_count,
+                'hire_date' => $employee->hire_date?->format('Y-m-d'),
+                'employment_status' => $employee->employment_status,
+                'employment_type' => $employee->employment_type,
+                'ptkp_category' => $employee->ptkp_category,
+                'family_card_number' => $employee->family_card_number,
+                'ktp_number' => $employee->ktp_number,
+                'bpjs_kesehatan_number' => $employee->bpjs_kesehatan_number,
+                'bpjs_ketenagakerjaan_number' => $employee->bpjs_ketenagakerjaan_number,
+                'sim_a_number' => $employee->sim_a_number,
+                'sim_b_number' => $employee->sim_b_number,
+                'sim_c_number' => $employee->sim_c_number,
+                'biological_mother_name' => $employee->biological_mother_name,
+                'emergency_contact_name' => $employee->emergency_contact_name,
+                'emergency_contact_phone' => $employee->emergency_contact_phone,
+                'face_enrolled' => ! empty($employee->face_embedding),
+                'face_photo_url' => $employee->face_photo_url,
+                'face_enrolled_at' => $employee->face_enrolled_at?->toIso8601String(),
+                'division' => $employee->division ? [
+                    'id' => $employee->division->id,
+                    'name' => $employee->division->name,
+                ] : null,
+                'position' => $employee->position ? [
+                    'id' => $employee->position->id,
+                    'name' => $employee->position->name,
+                ] : null,
+            ],
+            'bank_accounts' => $bankAccounts,
+            'profile_completion' => $completionService->summarize($employee),
+            'has_push_notification_device' => FcmDeviceToken::query()
+                ->where('user_id', $user->id)
+                ->exists(),
+            'company' => [
+                'name' => ($companySetting = CompanySetting::query()->where('user_id', $user->accountOwnerId())->first())?->name,
+                'logo_url' => $companySetting?->logo_path ? Storage::disk('public')->url($companySetting->logo_path) : null,
+            ],
+        ], 'Profile data retrieved successfully.');
+    }
+
+    /**
+     * Update employee profile and self-service identity fields.
+     */
+    public function updateProfile(Request $request): JsonResponse
+    {
+        /** @var User $user */
+        $user = $request->user();
+        $employee = $this->resolveRequiredSelfServiceEmployee($user);
+
+        if ($request->has('phone')) {
+            $phoneInput = preg_replace('/[\s\-]/', '', (string) $request->input('phone'));
+            $request->merge(['phone' => $phoneInput]);
+        }
+
+        $validated = $request->validate([
+            'phone' => ['required', 'string', 'max:20', 'regex:/^(\+?62|0)[0-9]{8,13}$/'],
+            'address' => ['required', 'string', 'max:500'],
+            'gender' => ['nullable', 'string', 'in:male,female,other'],
+            'birth_date' => ['nullable', 'date'],
+            'last_education' => ['nullable', 'string', 'max:100'],
+            'marital_status' => ['nullable', 'string', 'in:single,married,divorced,widowed'],
+            'children_count' => ['nullable', 'integer', 'min:0', 'max:99'],
+            'family_card_number' => ['nullable', 'string', 'max:32'],
+            'ktp_number' => ['nullable', 'string', 'max:32'],
+            'bpjs_kesehatan_number' => ['nullable', 'string', 'max:32'],
+            'bpjs_ketenagakerjaan_number' => ['nullable', 'string', 'max:32'],
+            'sim_a_number' => ['nullable', 'string', 'max:32'],
+            'sim_b_number' => ['nullable', 'string', 'max:32'],
+            'sim_c_number' => ['nullable', 'string', 'max:32'],
+            'biological_mother_name' => ['nullable', 'string', 'max:100'],
+            'emergency_contact_name' => ['nullable', 'string', 'max:100'],
+            'emergency_contact_phone' => ['nullable', 'string', 'max:30'],
+        ], [
+            'phone.regex' => 'Format nomor HP harus valid (contoh: 08123456789 atau +628123456789).',
+        ]);
+
+        $employee->update($validated);
+
+        if ($user->role === 'user' && $user->phone !== $validated['phone']) {
+            $user->forceFill([
+                'phone' => $validated['phone'],
+            ])->save();
+        }
+
+        $employee->refresh();
+
+        return $this->success([
+            'phone' => $employee->phone,
+            'address' => $employee->address,
+            'gender' => $employee->gender,
+            'birth_date' => $employee->birth_date?->format('Y-m-d'),
+            'last_education' => $employee->last_education,
+            'marital_status' => $employee->marital_status,
+            'children_count' => $employee->children_count,
+            'family_card_number' => $employee->family_card_number,
+            'ktp_number' => $employee->ktp_number,
+            'bpjs_kesehatan_number' => $employee->bpjs_kesehatan_number,
+            'bpjs_ketenagakerjaan_number' => $employee->bpjs_ketenagakerjaan_number,
+            'sim_a_number' => $employee->sim_a_number,
+            'sim_b_number' => $employee->sim_b_number,
+            'sim_c_number' => $employee->sim_c_number,
+            'biological_mother_name' => $employee->biological_mother_name,
+            'emergency_contact_name' => $employee->emergency_contact_name,
+            'emergency_contact_phone' => $employee->emergency_contact_phone,
+        ], 'Profil berhasil diperbarui.');
+    }
+
+    /**
+     * Update or create bank account (primary).
+     */
+    public function updateBankAccount(Request $request): JsonResponse
+    {
+        /** @var User $user */
+        $user = $request->user();
+        $employee = $this->resolveRequiredSelfServiceEmployee($user);
+
+        $validated = $request->validate([
+            'bank_name' => ['required', 'string', 'max:100'],
+            'account_number' => ['required', 'string', 'max:30'],
+            'account_holder_name' => ['required', 'string', 'max:150'],
+        ]);
+
+        // Hapus primary flag dari akun bank lain
+        EmployeeBankAccount::query()
+            ->where('employee_id', $employee->id)
+            ->update(['is_primary' => false]);
+
+        // Upsert akun bank primary
+        $account = EmployeeBankAccount::query()->updateOrCreate(
+            ['employee_id' => $employee->id, 'is_primary' => true],
+            [
+                'user_id' => $user->accountOwnerId(),
+                ...$validated,
+            ],
+        );
+
+        return $this->success([
+            'id' => $account->id,
+            'bank_name' => $account->bank_name,
+            'account_number' => $account->account_number,
+            'account_holder_name' => $account->account_holder_name,
+            'is_primary' => true,
+        ], 'Rekening bank berhasil disimpan.');
+    }
+
+    /**
+     * Pendaftaran / enrollment master wajah karyawan.
+     */
+    public function enrollFace(Request $request): JsonResponse
+    {
+        /** @var User $user */
+        $user = $request->user();
+        $employee = $this->resolveRequiredSelfServiceEmployee($user);
+
+        $validated = $request->validate([
+            'face_embedding' => ['required', 'array', 'min:128', 'max:128'],
+            'face_embedding.*' => ['required', 'numeric'],
+            'face_photo' => ['nullable', 'string'], // Data URL / base64 image
+        ]);
+
+        $photoUrl = null;
+        if (! empty($validated['face_photo']) && str_starts_with($validated['face_photo'], 'data:image/')) {
+            try {
+                $imageParts = explode(';base64,', $validated['face_photo']);
+                if (count($imageParts) === 2) {
+                    $imageTypeAux = explode('image/', $imageParts[0]);
+                    $imageType = $imageTypeAux[1] ?? 'jpg';
+                    $imageBase64 = base64_decode($imageParts[1], true);
+
+                    if ($imageBase64 !== false) {
+                        $filename = 'faces/'.$employee->id.'_'.time().'.'.$imageType;
+                        if (\App\Support\R2Storage::isConfigured()) {
+                            \App\Support\R2Storage::disk()->put($filename, $imageBase64);
+                            $photoUrl = \App\Support\R2Storage::url($filename);
+                        } else {
+                            \Illuminate\Support\Facades\Storage::disk('public')->put($filename, $imageBase64);
+                            $photoUrl = \Illuminate\Support\Facades\Storage::disk('public')->url($filename);
+                        }
+                    }
+                }
+            } catch (\Throwable $e) {
+                // Ignore photo storage error if disk fails, keep embedding
+            }
+        }
+
+        $employee->update([
+            'face_embedding' => array_map('floatval', $validated['face_embedding']),
+            'face_photo_url' => $photoUrl ?? $employee->face_photo_url,
+            'face_enrolled_at' => now(),
+        ]);
+
+        return $this->success([
+            'face_enrolled' => true,
+            'face_photo_url' => $employee->face_photo_url,
+            'face_enrolled_at' => $employee->face_enrolled_at?->toIso8601String(),
+        ], 'Master foto wajah berhasil didaftarkan.');
+    }
+
+    /**
+     * Hapus pendaftaran biometrik master wajah karyawan.
+     */
+    public function deleteFace(Request $request): JsonResponse
+    {
+        /** @var User $user */
+        $user = $request->user();
+        $employee = $this->resolveRequiredSelfServiceEmployee($user);
+
+        if ($employee->face_photo_url) {
+            try {
+                $path = parse_url($employee->face_photo_url, PHP_URL_PATH);
+                if ($path) {
+                    $relative = ltrim(preg_replace('#^/storage/#', '', $path), '/');
+                    if (\App\Support\R2Storage::isConfigured()) {
+                        \App\Support\R2Storage::disk()->delete($relative);
+                    } else {
+                        \Illuminate\Support\Facades\Storage::disk('public')->delete($relative);
+                    }
+                }
+            } catch (\Throwable $e) {
+                // Ignore storage error
+            }
+        }
+
+        $employee->update([
+            'face_embedding' => null,
+            'face_photo_url' => null,
+            'face_enrolled_at' => null,
+        ]);
+
+        return $this->success([
+            'face_enrolled' => false,
+            'face_photo_url' => null,
+            'face_enrolled_at' => null,
+        ], 'Data pengenalan verifikasi wajah berhasil dihapus.');
+    }
+}

@@ -1,0 +1,543 @@
+<?php
+
+namespace App\Http\Controllers\Hris;
+
+use App\Http\Controllers\Controller;
+use App\Http\Requests\Hris\StoreLeaveRequest;
+use App\Http\Requests\Hris\UpdateLeaveRequest;
+use App\Models\Employee;
+use App\Models\EmployeeLeaveBalance;
+use App\Models\LeaveRequest;
+use App\Models\User;
+use App\Services\LeaveApprovalService;
+use App\Services\LeaveBalanceService;
+use Carbon\Carbon;
+use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\Request;
+use Illuminate\Validation\Rule;
+use Inertia\Inertia;
+use Inertia\Response;
+use Symfony\Component\HttpFoundation\StreamedResponse;
+
+class LeaveController extends Controller
+{
+    /**
+     * Display leave management page.
+     */
+    public function index(Request $request): Response
+    {
+        $ownerId = $request->user()->accountOwnerId();
+
+        $validated = $request->validate([
+            'status' => ['nullable', 'string'],
+            'employee_id' => ['nullable', 'integer', Rule::exists('employees', 'id')->where('user_id', $ownerId)],
+            'date' => ['nullable', 'date'],
+            'start_date' => ['nullable', 'date'],
+            'end_date' => ['nullable', 'date', 'after_or_equal:start_date'],
+            'per_page' => ['nullable', 'in:10,25,50'],
+        ]);
+
+        $perPage = in_array((int) ($validated['per_page'] ?? $request->input('per_page')), [10, 25, 50], true)
+            ? (int) ($validated['per_page'] ?? $request->input('per_page'))
+            : 10;
+
+        $startDate = $validated['start_date'] ?? $validated['date'] ?? null;
+        $endDate = $validated['end_date'] ?? $validated['date'] ?? $startDate;
+
+        $filters = [
+            'status' => $validated['status'] ?? '',
+            'employee_id' => isset($validated['employee_id']) ? (string) $validated['employee_id'] : '',
+            'date' => $startDate ?? '',
+            'start_date' => $startDate ?? '',
+            'end_date' => $endDate ?? '',
+            'per_page' => $perPage,
+        ];
+
+        $leaves = LeaveRequest::query()
+            ->with('employee:id,employee_code,first_name,last_name')
+            ->when($filters['status'] !== '', fn ($query) => $query->where('status', $filters['status']))
+            ->when($filters['employee_id'] !== '', fn ($query) => $query->where('employee_id', $filters['employee_id']))
+            ->when($filters['start_date'] !== '' && $filters['end_date'] !== '', function ($query) use ($filters) {
+                $query->whereDate('start_date', '<=', $filters['end_date'])
+                    ->whereDate('end_date', '>=', $filters['start_date']);
+            })
+            ->orderByDesc('start_date')
+            ->paginate($perPage)
+            ->withQueryString()
+            ->through(fn (LeaveRequest $leave) => [
+                'id' => $leave->id,
+                'employee_id' => $leave->employee_id,
+                'employee_label' => $leave->employee
+                    ? $leave->employee->employee_code.' - '.$leave->employee->full_name
+                    : '-',
+                'leave_type' => $leave->leave_type,
+                'start_date' => $leave->start_date->format('Y-m-d'),
+                'end_date' => $leave->end_date->format('Y-m-d'),
+                'total_days' => $leave->total_days,
+                'reason' => $leave->reason,
+                'attachment' => $this->resolveAttachmentUrl($leave->attachment),
+                'attachment_name' => $leave->attachment_name,
+                'status' => $leave->status,
+                'rejection_reason' => $leave->rejection_reason,
+            ]);
+
+        $employees = Employee::query()
+            ->where('is_active', true)
+            ->where('employment_status', '!=', 'resigned')
+            ->orderBy('first_name')
+            ->orderBy('last_name')
+            ->get(['id', 'employee_code', 'first_name', 'last_name']);
+
+        return Inertia::render('hris/leaves/index', [
+            'leaves' => $leaves,
+            'employees' => $employees->map(fn (Employee $employee) => [
+                'id' => $employee->id,
+                'label' => $employee->employee_code.' - '.$employee->full_name,
+            ]),
+            'filters' => $filters,
+            'statusOptions' => ['pending', 'approved', 'rejected', 'cancelled'],
+            'typeOptions' => ['annual', 'sick', 'unpaid', 'other'],
+            'stats' => [
+                'pending' => LeaveRequest::query()->where('status', 'pending')->count(),
+                'approved' => LeaveRequest::query()->where('status', 'approved')->count(),
+            ],
+        ]);
+    }
+
+    public function approvals(Request $request): Response
+    {
+        $ownerId = $request->user()->accountOwnerId();
+
+        $validated = $request->validate([
+            'status' => ['nullable', 'string'],
+            'employee_id' => ['nullable', 'integer', Rule::exists('employees', 'id')->where('user_id', $ownerId)],
+            'date' => ['nullable', 'date'],
+            'start_date' => ['nullable', 'date'],
+            'end_date' => ['nullable', 'date', 'after_or_equal:start_date'],
+        ]);
+
+        $status = 'pending';
+        if ($request->has('status')) {
+            $rawStatus = (string) $request->input('status', '');
+            $status = in_array($rawStatus, ['pending', 'approved', 'rejected', 'cancelled'], true) ? $rawStatus : '';
+        }
+
+        $startDate = $validated['start_date'] ?? $validated['date'] ?? null;
+        $endDate = $validated['end_date'] ?? $validated['date'] ?? $startDate;
+
+        $filters = [
+            'status' => $status,
+            'employee_id' => isset($validated['employee_id']) ? (string) $validated['employee_id'] : '',
+            'date' => $startDate ?? '',
+            'start_date' => $startDate ?? '',
+            'end_date' => $endDate ?? '',
+        ];
+
+        $leaves = LeaveRequest::query()
+            ->with(['employee:id,employee_code,first_name,last_name,division_id,position_id', 'employee.division:id,name', 'employee.position:id,name', 'approver:id,name', 'firstApprover:id,name'])
+            ->where('user_id', $ownerId)
+            ->when($filters['status'] !== '', fn ($query) => $query->where('status', $filters['status']))
+            ->when($filters['employee_id'] !== '', fn ($query) => $query->where('employee_id', $filters['employee_id']))
+            ->when($filters['start_date'] !== '' && $filters['end_date'] !== '', function ($query) use ($filters) {
+                $query->whereDate('start_date', '<=', $filters['end_date'])
+                    ->whereDate('end_date', '>=', $filters['start_date']);
+            })
+            ->orderByRaw("CASE WHEN status = 'pending' THEN 0 ELSE 1 END")
+            ->orderByDesc('start_date')
+            ->paginate(15)
+            ->withQueryString()
+            ->through(fn (LeaveRequest $leave) => [
+                'id' => $leave->id,
+                'employee_id' => $leave->employee_id,
+                'employee_label' => $leave->employee ? $leave->employee->employee_code.' - '.$leave->employee->full_name : '-',
+                'division_name' => $leave->employee?->division?->name,
+                'position_name' => $leave->employee?->position?->name,
+                'leave_type' => $leave->leave_type,
+                'start_date' => $leave->start_date->format('Y-m-d'),
+                'end_date' => $leave->end_date->format('Y-m-d'),
+                'total_days' => $leave->total_days,
+                'reason' => $leave->reason,
+                'attachment' => $this->resolveAttachmentUrl($leave->attachment),
+                'attachment_name' => $leave->attachment_name,
+                'status' => $leave->status,
+                'rejection_reason' => $leave->rejection_reason,
+                'approver_name' => $leave->approver?->name,
+                'approved_at' => $leave->approved_at?->format('Y-m-d H:i'),
+                'approval_step' => $leave->approval_step,
+                'first_approver_name' => $leave->firstApprover?->name,
+                'first_approved_at' => $leave->first_approved_at?->format('Y-m-d H:i'),
+            ]);
+
+        $employees = Employee::query()
+            ->where('is_active', true)
+            ->where('employment_status', '!=', 'resigned')
+            ->orderBy('first_name')
+            ->orderBy('last_name')
+            ->get(['id', 'employee_code', 'first_name', 'last_name']);
+
+        return Inertia::render('hris/leave-approvals/index', [
+            'leaves' => $leaves,
+            'employees' => $employees->map(fn (Employee $employee) => [
+                'id' => $employee->id,
+                'label' => $employee->employee_code.' - '.$employee->full_name,
+            ]),
+            'filters' => $filters,
+            'statusOptions' => ['pending', 'approved', 'rejected', 'cancelled'],
+            'stats' => [
+                'pending' => LeaveRequest::query()->where('user_id', $ownerId)->where('status', 'pending')->count(),
+                'approved' => LeaveRequest::query()->where('user_id', $ownerId)->where('status', 'approved')->count(),
+                'rejected' => LeaveRequest::query()->where('user_id', $ownerId)->where('status', 'rejected')->count(),
+            ],
+            'approvalLevels' => (int) (app(LeaveBalanceService::class)->getPolicy(User::findOrFail($ownerId), 'annual')?->approval_levels ?? 1),
+        ]);
+    }
+
+    public function approve(Request $request, LeaveRequest $leave): RedirectResponse
+    {
+        abort_unless((int) $leave->user_id === $request->user()->accountOwnerId(), 404);
+
+        $result = app(LeaveApprovalService::class)->approve($leave, $request->user());
+
+        if ($result === LeaveApprovalService::FIRST_LEVEL) {
+            return back()->with('success', 'Approval tingkat 1 berhasil. Menunggu approval tingkat 2.');
+        }
+
+        $leave->loadMissing('employee');
+        app(\App\Services\WhatsAppNotificationService::class)->notifyLeaveStatus($leave);
+
+        return back()->with('success', $leave->approval_stage === 2
+            ? 'Pengajuan cuti disetujui pada tingkat 2.'
+            : 'Pengajuan cuti disetujui.');
+    }
+
+    public function reject(Request $request, LeaveRequest $leave): RedirectResponse
+    {
+        abort_unless((int) $leave->user_id === $request->user()->accountOwnerId(), 404);
+
+        if ($leave->status !== 'pending') {
+            return back()->with('error', 'Request cuti sudah diproses.');
+        }
+
+        $validated = $request->validate([
+            'rejection_reason' => ['required', 'string', 'max:255'],
+        ]);
+
+        $leave->update([
+            'status' => 'rejected',
+            'approved_at' => now(),
+            'approved_by' => $request->user()->id,
+            'rejection_reason' => $validated['rejection_reason'],
+        ]);
+
+        $leave->loadMissing('employee');
+        app(\App\Services\WhatsAppNotificationService::class)->notifyLeaveStatus($leave);
+
+        return back()->with('success', 'Pengajuan cuti ditolak.');
+    }
+
+    public function bulkApprove(Request $request): RedirectResponse
+    {
+        $ownerId = $request->user()->accountOwnerId();
+        $validated = $request->validate([
+            'ids' => ['required', 'array', 'min:1'],
+            'ids.*' => ['required', 'integer'],
+        ]);
+
+        $requests = LeaveRequest::query()
+            ->where('user_id', $ownerId)
+            ->whereIn('id', $validated['ids'])
+            ->where('status', 'pending')
+            ->get();
+
+        $approvedCount = 0;
+        foreach ($requests as $leave) {
+            try {
+                $result = app(LeaveApprovalService::class)->approve($leave, $request->user());
+                $leave->loadMissing('employee');
+                app(\App\Services\WhatsAppNotificationService::class)->notifyLeaveStatus($leave);
+                $approvedCount++;
+            } catch (\Throwable $e) {
+                continue;
+            }
+        }
+
+        return back()->with('success', "{$approvedCount} pengajuan cuti berhasil disetujui.");
+    }
+
+    public function bulkReject(Request $request): RedirectResponse
+    {
+        $ownerId = $request->user()->accountOwnerId();
+        $validated = $request->validate([
+            'ids' => ['required', 'array', 'min:1'],
+            'ids.*' => ['required', 'integer'],
+            'rejection_reason' => ['required', 'string', 'max:255'],
+        ]);
+
+        $requests = LeaveRequest::query()
+            ->where('user_id', $ownerId)
+            ->whereIn('id', $validated['ids'])
+            ->where('status', 'pending')
+            ->get();
+
+        $rejectedCount = 0;
+        foreach ($requests as $leave) {
+            try {
+                $leave->update([
+                    'status' => 'rejected',
+                    'approved_at' => now(),
+                    'approved_by' => $request->user()->id,
+                    'rejection_reason' => $validated['rejection_reason'],
+                ]);
+                $leave->loadMissing('employee');
+                app(\App\Services\WhatsAppNotificationService::class)->notifyLeaveStatus($leave);
+                $rejectedCount++;
+            } catch (\Throwable $e) {
+                continue;
+            }
+        }
+
+        return back()->with('success', "{$rejectedCount} pengajuan cuti berhasil ditolak.");
+    }
+
+    /**
+     * Store leave request.
+     */
+    public function store(StoreLeaveRequest $request): RedirectResponse
+    {
+        $validated = $request->validated();
+
+        $totalDays = $this->calculateTotalDays($validated['start_date'], $validated['end_date']);
+
+        [$approvedAt, $approvedBy] = $this->resolveApprovalState($validated['status'], $request->user()?->id);
+
+        if ($request->hasFile('attachment')) {
+            $file = $request->file('attachment');
+            $path = $file->store('leave-attachments', 'public');
+            $validated['attachment'] = $path;
+            $validated['attachment_name'] = $file->getClientOriginalName();
+        }
+
+        $leave = LeaveRequest::create([
+            ...$validated,
+            'total_days' => $totalDays,
+            'approved_at' => $approvedAt,
+            'approved_by' => $approvedBy,
+        ]);
+
+        // Send WhatsApp notification if status is approved or rejected
+        if (in_array($validated['status'], ['approved', 'rejected'], true)) {
+            $leave->loadMissing('employee');
+            app(\App\Services\WhatsAppNotificationService::class)->notifyLeaveStatus($leave);
+        }
+
+        // Deduct balance when annual leave is approved on creation
+        if ($validated['leave_type'] === 'annual' && $validated['status'] === 'approved') {
+            $balanceService = app(LeaveBalanceService::class);
+            if (! $balanceService->deductBalance($leave)) {
+                $remaining = $this->getRemainingBalance($leave);
+                $leave->delete();
+
+                return back()->withErrors(['balance' => "Saldo cuti tidak mencukupi. Sisa saldo: {$remaining} hari."]);
+            }
+        }
+
+        return back();
+    }
+
+    /**
+     * Update leave request.
+     */
+    public function update(UpdateLeaveRequest $request, LeaveRequest $leave): RedirectResponse
+    {
+        $validated = $request->validated();
+
+        if ($request->hasFile('attachment')) {
+            $file = $request->file('attachment');
+            $path = $file->store('leave-attachments', 'public');
+            $validated['attachment'] = $path;
+            $validated['attachment_name'] = $file->getClientOriginalName();
+        }
+
+        $totalDays = $this->calculateTotalDays($validated['start_date'], $validated['end_date']);
+        $previousStatus = $leave->status;
+        $newStatus = $validated['status'];
+
+        [$approvedAt, $approvedBy] = $this->resolveApprovalState(
+            $newStatus,
+            $request->user()?->id,
+            $leave->approved_at?->toDateTimeString(),
+            $leave->approved_by
+        );
+
+        $leave->update([
+            ...$validated,
+            'total_days' => $totalDays,
+            'approved_at' => $approvedAt,
+            'approved_by' => $approvedBy,
+        ]);
+
+        // Send WhatsApp notification if status changed to approved or rejected
+        if ($previousStatus !== $newStatus && in_array($newStatus, ['approved', 'rejected'], true)) {
+            $leave->loadMissing('employee');
+            app(\App\Services\WhatsAppNotificationService::class)->notifyLeaveStatus($leave);
+        }
+
+        // Handle balance changes for annual leave
+        if ($leave->leave_type === 'annual') {
+            $balanceService = app(LeaveBalanceService::class);
+
+            // Restore balance when going from approved -> rejected/cancelled
+            if ($previousStatus === 'approved' && in_array($newStatus, ['rejected', 'cancelled'])) {
+                $balanceService->restoreBalance($leave);
+            }
+
+            // Deduct balance when newly approved (was not approved before)
+            if ($newStatus === 'approved' && $previousStatus !== 'approved') {
+                if (! $balanceService->deductBalance($leave)) {
+                    $remaining = $this->getRemainingBalance($leave);
+                    // Revert to previous status
+                    $leave->update(['status' => $previousStatus, 'approved_at' => null, 'approved_by' => null]);
+
+                    return back()->withErrors(['balance' => "Saldo cuti tidak mencukupi. Sisa saldo: {$remaining} hari."]);
+                }
+            }
+        }
+
+        return back();
+    }
+
+    /**
+     * Delete leave request.
+     */
+    public function destroy(LeaveRequest $leave): RedirectResponse
+    {
+        $leave->delete();
+
+        return back();
+    }
+
+    /**
+     * Export leave requests to XLS-compatible file.
+     */
+    public function export(Request $request): StreamedResponse
+    {
+        $ownerId = $request->user()->accountOwnerId();
+
+        $validated = $request->validate([
+            'status' => ['nullable', 'string'],
+            'employee_id' => ['nullable', 'integer', Rule::exists('employees', 'id')->where('user_id', $ownerId)],
+            'date' => ['nullable', 'date'],
+            'start_date' => ['nullable', 'date'],
+            'end_date' => ['nullable', 'date', 'after_or_equal:start_date'],
+        ]);
+
+        $startDate = $validated['start_date'] ?? $validated['date'] ?? null;
+        $endDate = $validated['end_date'] ?? $validated['date'] ?? $startDate;
+
+        $filters = [
+            'status' => $validated['status'] ?? '',
+            'employee_id' => isset($validated['employee_id']) ? (string) $validated['employee_id'] : '',
+            'date' => $startDate ?? '',
+            'start_date' => $startDate ?? '',
+            'end_date' => $endDate ?? '',
+        ];
+
+        $rows = LeaveRequest::query()
+            ->with('employee:id,employee_code,first_name,last_name')
+            ->when($filters['status'] !== '', fn ($query) => $query->where('status', $filters['status']))
+            ->when($filters['employee_id'] !== '', fn ($query) => $query->where('employee_id', $filters['employee_id']))
+            ->when($filters['start_date'] !== '' && $filters['end_date'] !== '', function ($query) use ($filters) {
+                $query->whereDate('start_date', '<=', $filters['end_date'])
+                    ->whereDate('end_date', '>=', $filters['start_date']);
+            })
+            ->orderByDesc('start_date')
+            ->get();
+
+        $fileName = 'leaves_'.now()->format('Ymd_His').'.xls';
+
+        return response()->streamDownload(function () use ($rows): void {
+            $out = fopen('php://output', 'wb');
+
+            fputcsv($out, [
+                'Kode Pegawai',
+                'Nama Pegawai',
+                'Jenis Cuti',
+                'Tanggal Mulai',
+                'Tanggal Selesai',
+                'Total Hari',
+                'Status',
+                'Alasan',
+            ], "\t");
+
+            foreach ($rows as $row) {
+                fputcsv($out, [
+                    $row->employee?->employee_code,
+                    $row->employee?->full_name,
+                    $row->leave_type,
+                    $row->start_date?->format('Y-m-d'),
+                    $row->end_date?->format('Y-m-d'),
+                    $row->total_days,
+                    $row->status,
+                    $row->reason,
+                ], "\t");
+            }
+
+            fclose($out);
+        }, $fileName, [
+            'Content-Type' => 'application/vnd.ms-excel; charset=UTF-8',
+        ]);
+    }
+
+    /**
+     * Get remaining balance for an employee on a leave request.
+     */
+    private function getRemainingBalance(LeaveRequest $leave): float
+    {
+        $balance = EmployeeLeaveBalance::withoutGlobalScopes()
+            ->where('employee_id', $leave->employee_id)
+            ->where('leave_type', $leave->leave_type)
+            ->where('year', $leave->start_date->year)
+            ->first();
+
+        return $balance ? $balance->remainingBalance() : 0;
+    }
+
+    /**
+     * Calculate total leave days inclusively.
+     */
+    private function calculateTotalDays(string $startDate, string $endDate): float
+    {
+        return (float) Carbon::parse($startDate)->diffInDays(Carbon::parse($endDate)) + 1;
+    }
+
+    /**
+     * Resolve approval fields based on status.
+     *
+     * @return array{0: null|string, 1: null|int}
+     */
+    private function resolveApprovalState(string $status, null|int|string $userId, ?string $currentApprovedAt = null, ?int $currentApprovedBy = null): array
+    {
+        if ($status === 'approved') {
+            return [$currentApprovedAt ?? now()->toDateTimeString(), $currentApprovedBy ?? (int) $userId];
+        }
+
+        return [null, null];
+    }
+
+    private function resolveAttachmentUrl(?string $path): ?string
+    {
+        if (! $path) {
+            return null;
+        }
+
+        if (str_starts_with($path, 'http://') || str_starts_with($path, 'https://')) {
+            return $path;
+        }
+
+        if (str_starts_with($path, 'storage/')) {
+            return asset($path);
+        }
+
+        return asset('storage/' . ltrim($path, '/'));
+    }
+}

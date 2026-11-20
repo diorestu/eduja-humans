@@ -1,0 +1,228 @@
+<?php
+
+namespace App\Http\Controllers\Api\Mobile\V1;
+
+use App\Http\Controllers\Api\Concerns\InteractsWithMobileApiResponse;
+use App\Http\Controllers\Api\Mobile\V1\Concerns\InteractsWithSelfService;
+use App\Http\Controllers\Controller;
+use App\Models\AttendanceCorrectionRequest;
+use App\Models\EmployeeAttendance;
+use App\Models\User;
+use App\Services\MissingClockOutRequestPolicy;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Carbon;
+use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
+
+class AttendanceCorrectionRequestController extends Controller
+{
+    use InteractsWithMobileApiResponse, InteractsWithSelfService;
+
+    public function index(Request $request): JsonResponse
+    {
+        /** @var User $user */
+        $user = $request->user();
+        $employee = $this->resolveRequiredSelfServiceEmployee($user);
+        $timezone = $this->deviceTimezone($request, $employee->timezone);
+
+        $requests = AttendanceCorrectionRequest::query()
+            ->with('shift:id,code,name,start_time,end_time,is_day_off')
+            ->where('user_id', $user->accountOwnerId())
+            ->where('employee_id', $employee->id)
+            ->latest('attendance_date')
+            ->latest('id')
+            ->limit(15)
+            ->get();
+
+        return $this->success([
+            'items' => $requests->map(fn (AttendanceCorrectionRequest $request) => $this->payload($request, $timezone))->values(),
+            'eligible_missing_clock_out_dates' => $this->eligibleMissingClockOutDates($user->accountOwnerId(), $employee->id, $timezone),
+        ]);
+    }
+
+    public function store(Request $request): JsonResponse
+    {
+        /** @var User $user */
+        $user = $request->user();
+        $ownerId = $user->accountOwnerId();
+        $employee = $this->resolveRequiredSelfServiceEmployee($user);
+        $timezone = $this->deviceTimezone($request, $employee->timezone);
+
+        $validated = $request->validate([
+            'request_type' => ['nullable', Rule::in(['manual_attendance', 'missing_clock_out'])],
+            'attendance_date' => ['required', 'date', 'before_or_equal:today'],
+            'shift_id' => ['nullable', 'integer', Rule::exists('work_shifts', 'id')->where('user_id', $ownerId)],
+            'check_in_at' => ['nullable', 'date'],
+            'check_out_at' => ['nullable', 'date', 'after_or_equal:check_in_at'],
+            'reason' => ['required', 'string', 'max:1000'],
+        ]);
+
+        $requestType = $validated['request_type'] ?? 'manual_attendance';
+        $attendance = null;
+
+        if ($requestType === 'missing_clock_out') {
+            if (empty($validated['check_out_at'])) {
+                return $this->error('Jam pulang wajib diisi untuk pengajuan lupa absen pulang.', 422);
+            }
+
+            if (! empty($validated['check_in_at'])) {
+                return $this->error('Pengajuan lupa absen pulang tidak dapat mengubah jam masuk.', 422);
+            }
+
+            $attendance = app(MissingClockOutRequestPolicy::class)->assertEligible(
+                $ownerId,
+                $employee->id,
+                $validated['attendance_date'],
+                $timezone,
+            );
+        } elseif (empty($validated['check_in_at']) && empty($validated['check_out_at'])) {
+            return $this->error('Jam masuk atau jam pulang wajib diisi.');
+        }
+
+        $this->normalizeAttendanceTimestamps($validated, $timezone);
+
+        if (
+            $attendance !== null
+            && ! empty($validated['check_out_at'])
+            && Carbon::parse($validated['check_out_at'])->lt($attendance->check_in_at)
+        ) {
+            return $this->error('Jam pulang tidak boleh sebelum jam masuk.', 422);
+        }
+
+        $attendanceRequest = AttendanceCorrectionRequest::query()->create([
+            'user_id' => $ownerId,
+            'employee_id' => $employee->id,
+            'attendance_date' => $validated['attendance_date'],
+            'timezone' => $attendance?->timezone ?? $timezone,
+            'shift_id' => $validated['shift_id'] ?? $attendance?->shift_id,
+            'check_in_at' => $validated['check_in_at'] ?? null,
+            'check_out_at' => $validated['check_out_at'] ?? null,
+            'reason' => $validated['reason'],
+            'request_type' => $requestType,
+            'status' => 'pending',
+        ]);
+
+        $attendanceRequest->load('shift:id,code,name,start_time,end_time,is_day_off');
+
+        return $this->success($this->payload($attendanceRequest, $timezone), 'Pengajuan absensi berhasil dikirim.', 201);
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function payload(AttendanceCorrectionRequest $request, ?string $timezone = null): array
+    {
+        $timezone ??= config('app.timezone');
+        $sourceTimezone = is_string($request->timezone)
+            && in_array($request->timezone, timezone_identifiers_list(), true)
+                ? $request->timezone
+                : $timezone;
+
+        return [
+            'id' => $request->id,
+            'attendance_date' => $request->attendance_date?->format('Y-m-d'),
+            'timezone' => $request->timezone,
+            'shift' => $request->shift ? [
+                'id' => $request->shift->id,
+                'code' => $request->shift->code,
+                'name' => $request->shift->name,
+                'start_time' => $request->shift->start_time,
+                'end_time' => $request->shift->end_time,
+                'is_day_off' => $request->shift->is_day_off,
+            ] : null,
+            'check_in_at' => $this->localTimestamp($request->check_in_at, $sourceTimezone),
+            'check_out_at' => $this->localTimestamp($request->check_out_at, $sourceTimezone),
+            'reason' => $request->reason,
+            'request_type' => $request->request_type ?? 'manual_attendance',
+            'status' => $request->status,
+            'rejection_reason' => $request->rejection_reason,
+        ];
+    }
+
+    private function deviceTimezone(Request $request, ?string $fallback = null): string
+    {
+        $timezone = (string) $request->header('X-Timezone', '');
+
+        if (in_array($timezone, timezone_identifiers_list(), true)) {
+            return $timezone;
+        }
+
+        return $fallback !== null && in_array($fallback, timezone_identifiers_list(), true)
+            ? $fallback
+            : config('app.timezone');
+    }
+
+    /**
+     * @param  array<string, mixed>  $validated
+     */
+    private function normalizeAttendanceTimestamps(array &$validated, string $timezone): void
+    {
+        foreach (['check_in_at', 'check_out_at'] as $key) {
+            if (! array_key_exists($key, $validated) || $validated[$key] === null || $validated[$key] === '') {
+                continue;
+            }
+
+            $validated[$key] = $this->deviceLocalDateTime((string) $validated[$key], $timezone);
+        }
+    }
+
+    private function deviceLocalDateTime(string $value, string $timezone): string
+    {
+        $hasTimezone = (bool) preg_match('/(?:Z|[+-]\d{2}:?\d{2})$/i', $value);
+        $date = $hasTimezone
+            ? Carbon::parse($value)
+            : Carbon::parse($value, $timezone);
+
+        return $date->utc()->format('Y-m-d H:i:s');
+    }
+
+    private function localTimestamp(mixed $value, string $timezone): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        return Carbon::parse($value, config('app.timezone'))->setTimezone($timezone)->toIso8601String();
+    }
+
+    /** @return array<int, array{attendance_date: string, shift: array{id: int, code: string, name: string, start_time: string|null, end_time: string|null, is_day_off: bool}|null}> */
+    private function eligibleMissingClockOutDates(int $ownerId, int $employeeId, string $timezone): array
+    {
+        return EmployeeAttendance::query()
+            ->with('shift:id,code,name,start_time,end_time,is_day_off')
+            ->where('user_id', $ownerId)
+            ->where('employee_id', $employeeId)
+            ->whereNotNull('check_in_at')
+            ->whereNull('check_out_at')
+            ->latest('attendance_date')
+            ->get()
+            ->filter(function (EmployeeAttendance $attendance) use ($ownerId, $employeeId, $timezone): bool {
+                try {
+                    app(MissingClockOutRequestPolicy::class)->assertEligible(
+                        $ownerId,
+                        $employeeId,
+                        $attendance->attendance_date->toDateString(),
+                        $timezone,
+                    );
+
+                    return true;
+                } catch (ValidationException) {
+                    return false;
+                }
+            })
+            ->map(fn (EmployeeAttendance $attendance): array => [
+                'attendance_date' => $attendance->attendance_date->toDateString(),
+                'shift' => $attendance->shift ? [
+                    'id' => $attendance->shift->id,
+                    'code' => $attendance->shift->code,
+                    'name' => $attendance->shift->name,
+                    'start_time' => $attendance->shift->start_time,
+                    'end_time' => $attendance->shift->end_time,
+                    'is_day_off' => $attendance->shift->is_day_off,
+                ] : null,
+            ])
+            ->values()
+            ->all();
+    }
+}

@@ -1,0 +1,110 @@
+<?php
+
+return [
+
+    /*
+    |--------------------------------------------------------------------------
+    | Third Party Services
+    |--------------------------------------------------------------------------
+    |
+    | This file is for storing the credentials for third party services such
+    | as Mailgun, Postmark, AWS and more. This file provides the de facto
+    | location for this type of information, allowing packages to have
+    | a conventional file to locate the various service credentials.
+    |
+    */
+
+    'postmark' => [
+        'key' => env('POSTMARK_API_KEY'),
+    ],
+
+    'resend' => [
+        'key' => env('RESEND_API_KEY'),
+    ],
+
+    'ses' => [
+        'key' => env('AWS_ACCESS_KEY_ID'),
+        'secret' => env('AWS_SECRET_ACCESS_KEY'),
+        'region' => env('AWS_DEFAULT_REGION', 'us-east-1'),
+    ],
+
+    'slack' => [
+        'notifications' => [
+            'bot_user_oauth_token' => env('SLACK_BOT_USER_OAUTH_TOKEN'),
+            'channel' => env('SLACK_BOT_USER_DEFAULT_CHANNEL'),
+        ],
+    ],
+
+    'waha' => [
+        'enabled' => env('WAHA_ENABLED', false),
+        'base_url' => env('WAHA_BASE_URL'),
+        'api_key' => env('WAHA_API_KEY'),
+        'session' => env('WAHA_SESSION', 'ZeniConsulting'),
+        'timeout' => env('WAHA_TIMEOUT', 15),
+        'otp_send_delay_seconds' => (int) env('WAHA_OTP_SEND_DELAY_SECONDS', 30),
+        'registration_group_chat_id' => env('WAHA_REGISTRATION_GROUP_CHAT_ID', '120363407707938809@g.us'),
+        'subscription_renewal_group_chat_id' => env('WAHA_SUBSCRIPTION_RENEWAL_GROUP_CHAT_ID', env('WAHA_REGISTRATION_GROUP_CHAT_ID', '120363407707938809@g.us')),
+    ],
+
+    'pakasir' => [
+        'base_url' => env('PAKASIR_BASE_URL', 'https://app.pakasir.com'),
+        'project' => env('PAKASIR_PROJECT'),
+        'api_key' => env('PAKASIR_API_KEY'),
+        'timeout' => (int) env('PAKASIR_TIMEOUT', 15),
+    ],
+
+    'sumopod' => [
+        'mode' => env('SUMOPOD_MODE', env('SUMOPOD_SANDBOX', true) ? 'sandbox' : 'production'),
+        'sandbox_base_url' => env('SUMOPOD_SANDBOX_BASE_URL', 'https://api-pay-sandbox.sumopod.com'),
+        'production_base_url' => env('SUMOPOD_PRODUCTION_BASE_URL', 'https://api-pay.sumopod.com'),
+        'sandbox_api_key' => env('SUMOPOD_SANDBOX_API_KEY'),
+        'production_api_key' => env('SUMOPOD_PRODUCTION_API_KEY'),
+        'base_url' => env('SUMOPOD_BASE_URL'),
+        'api_key' => env('SUMOPOD_API_KEY'),
+        'timeout' => (int) env('SUMOPOD_TIMEOUT', 15),
+    ],
+
+    'firebase' => [
+        'credentials' => env('FIREBASE_CREDENTIALS'),
+        'web' => [
+            'apiKey' => env('VITE_FIREBASE_API_KEY'),
+            'authDomain' => env('VITE_FIREBASE_AUTH_DOMAIN'),
+            'projectId' => env('VITE_FIREBASE_PROJECT_ID'),
+            'storageBucket' => env('VITE_FIREBASE_STORAGE_BUCKET'),
+            'messagingSenderId' => env('VITE_FIREBASE_MESSAGING_SENDER_ID'),
+            'appId' => env('VITE_FIREBASE_APP_ID'),
+        ],
+    ],
+
+    'web_push' => [
+        'subject' => env('WEB_PUSH_VAPID_SUBJECT', env('APP_URL')),
+        'public_key' => env('WEB_PUSH_VAPID_PUBLIC_KEY'),
+        'private_key' => env('WEB_PUSH_VAPID_PRIVATE_KEY'),
+    ],
+
+    'n8n' => [
+        'staff_invitation' => [
+            'url' => env('N8N_STAFF_INVITATION_WEBHOOK_URL'),
+            'username' => env('N8N_STAFF_INVITATION_USERNAME'),
+            'password' => env('N8N_STAFF_INVITATION_PASSWORD'),
+            'timeout' => (int) env('N8N_STAFF_INVITATION_TIMEOUT', 15),
+        ],
+    ],
+
+    'telegram' => [
+        'bot' => env('TELEGRAM_BOT_NAME'),
+        'client_id' => null,
+        'client_secret' => env('TELEGRAM_BOT_TOKEN'),
+        'redirect' => env('TELEGRAM_REDIRECT_URI', '/auth/telegram/callback'),
+    ],
+
+    'holiday_api' => [
+        'base_url' => env('HOLIDAY_API_BASE_URL', 'https://api.kemendesa.link/libur-nasional/api'),
+        'latest_url' => env('HOLIDAY_API_LATEST_URL', 'https://api.kemendesa.link/libur-nasional/api/holidays/latest'),
+        'year_url_template' => env('HOLIDAY_API_YEAR_URL_TEMPLATE', 'https://api.kemendesa.link/libur-nasional/api/holidays/%d.json'),
+        'is_holiday_url' => env('HOLIDAY_API_IS_HOLIDAY_URL', 'https://api.kemendesa.link/libur-nasional/api/is-holiday'),
+        'legacy_url' => env('HOLIDAY_API_LEGACY_URL', 'https://libur.deno.dev/api'),
+        'timeout' => (int) env('HOLIDAY_API_TIMEOUT', 15),
+    ],
+
+];

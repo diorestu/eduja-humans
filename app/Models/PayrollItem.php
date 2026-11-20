@@ -1,0 +1,141 @@
+<?php
+
+namespace App\Models;
+
+use App\Models\Concerns\BelongsToAccount;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+
+class PayrollItem extends Model
+{
+    /** @use HasFactory<\Database\Factories\PayrollItemFactory> */
+    use BelongsToAccount, HasFactory;
+
+    /**
+     * The attributes that are mass assignable.
+     *
+     * @var list<string>
+     */
+    protected $fillable = [
+        'user_id',
+        'payroll_run_id',
+        'employee_id',
+        'company_name',
+        'company_identity',
+        'company_details',
+        'calculation_basis',
+        'manual_overrides',
+        'tax_reviewed',
+        'tax_basis_hash',
+        'base_salary',
+        'allowances_total',
+        'is_prorated',
+        'proration_working_days',
+        'proration_payable_days',
+        'proration_factor',
+        'overtime_hours',
+        'overtime_pay',
+        'pph21_method',
+        'salary_type',
+        'pph21_rate',
+        'pph21_allowance',
+        'pph21_deduction',
+        'pph21_company_borne',
+        'bpjs_kesehatan_company',
+        'bpjs_kesehatan_employee',
+        'bpjs_kesehatan_class',
+        'bpjs_kesehatan_reported_wage',
+        'bpjs_jkk_company',
+        'bpjs_jkm_company',
+        'bpjs_jht_company',
+        'bpjs_jht_employee',
+        'bpjs_jp_company',
+        'bpjs_jp_employee',
+        'bpjs_total_company',
+        'bpjs_total_employee',
+        'private_insurance_name',
+        'private_insurance_nominal',
+        'kasbon_deduction',
+        'denda_deduction',
+        'denda_breakdown',
+        'unpaid_leave_deduction',
+        'manual_deduction_total',
+        'manual_deduction_breakdown',
+        'deductions_total',
+        'net_salary',
+        'allowance_breakdown',
+        'variable_allowance_breakdown',
+        'bonus_breakdown',
+        'thr_months_of_service',
+        'thr_amount',
+    ];
+
+    /**
+     * Get the attributes that should be cast.
+     *
+     * @return array<string, string>
+     */
+    protected function casts(): array
+    {
+        return [
+            'company_identity' => 'array',
+            'calculation_basis' => 'array',
+            'manual_overrides' => 'array',
+            'tax_reviewed' => 'boolean',
+            'base_salary' => 'decimal:2',
+            'allowances_total' => 'decimal:2',
+            'is_prorated' => 'boolean',
+            'proration_working_days' => 'integer',
+            'proration_payable_days' => 'integer',
+            'proration_factor' => 'decimal:6',
+            'overtime_hours' => 'decimal:2',
+            'overtime_pay' => 'decimal:2',
+            'pph21_rate' => 'decimal:2',
+            'pph21_allowance' => 'decimal:2',
+            'pph21_deduction' => 'decimal:2',
+            'pph21_company_borne' => 'decimal:2',
+            'bpjs_kesehatan_company' => 'decimal:2',
+            'bpjs_kesehatan_employee' => 'decimal:2',
+            'bpjs_kesehatan_reported_wage' => 'decimal:2',
+            'bpjs_jkk_company' => 'decimal:2',
+            'bpjs_jkm_company' => 'decimal:2',
+            'bpjs_jht_company' => 'decimal:2',
+            'bpjs_jht_employee' => 'decimal:2',
+            'bpjs_jp_company' => 'decimal:2',
+            'bpjs_jp_employee' => 'decimal:2',
+            'bpjs_total_company' => 'decimal:2',
+            'bpjs_total_employee' => 'decimal:2',
+            'private_insurance_nominal' => 'decimal:2',
+            'kasbon_deduction' => 'decimal:2',
+            'denda_deduction' => 'decimal:2',
+            'denda_breakdown' => 'array',
+            'unpaid_leave_deduction' => 'decimal:2',
+            'manual_deduction_total' => 'decimal:2',
+            'manual_deduction_breakdown' => 'array',
+            'deductions_total' => 'decimal:2',
+            'net_salary' => 'decimal:2',
+            'allowance_breakdown' => 'array',
+            'variable_allowance_breakdown' => 'array',
+            'bonus_breakdown' => 'array',
+            'thr_months_of_service' => 'integer',
+            'thr_amount' => 'decimal:2',
+        ];
+    }
+
+    /**
+     * Get payroll run that owns this item.
+     */
+    public function payrollRun(): BelongsTo
+    {
+        return $this->belongsTo(PayrollRun::class);
+    }
+
+    /**
+     * Get employee that owns this payroll item.
+     */
+    public function employee(): BelongsTo
+    {
+        return $this->belongsTo(Employee::class);
+    }
+}

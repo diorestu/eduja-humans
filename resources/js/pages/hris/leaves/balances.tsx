@@ -1,0 +1,980 @@
+import { Head, Link, router, useForm, usePage } from '@inertiajs/react';
+import {
+    AlertTriangle,
+    ArrowLeft,
+    BookOpen,
+    CheckCircle,
+    History,
+    Play,
+    Plus,
+    RefreshCw,
+    Settings2,
+    SlidersHorizontal,
+} from 'lucide-react';
+import { useState } from 'react';
+import type { FormEvent } from 'react';
+import InputError from '@/components/input-error';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import {
+    Card,
+    CardContent,
+    CardDescription,
+    CardHeader,
+    CardTitle,
+} from '@/components/ui/card';
+import {
+    Dialog,
+    DialogContent,
+    DialogDescription,
+    DialogFooter,
+    DialogHeader,
+    DialogTitle,
+} from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import SearchableSelect from '@/components/ui/searchable-select';
+import {
+    Select,
+    SelectContent,
+    SelectItem,
+    SelectTrigger,
+    SelectValue,
+} from '@/components/ui/select';
+import AppLayout from '@/layouts/app-layout';
+import { index as leavesIndex } from '@/routes/hris/leaves';
+import type { BreadcrumbItem } from '@/types';
+
+type BalanceRow = {
+    employee_id: number;
+    employee_label: string;
+    total_quota: number;
+    accrued_days: number;
+    used_days: number;
+    adjusted_days: number;
+    remaining_balance: number;
+    policy_type: PolicyMethod;
+    period_start: string | null;
+    period_end: string | null;
+    has_balance: boolean;
+};
+
+type Policy = {
+    id: number;
+    leave_type: string;
+    policy_type: PolicyMethod;
+    yearly_days: number;
+    waiting_period_months: number;
+    max_days_per_request: number | null;
+    min_notice_days: number;
+    approval_levels: 1 | 2;
+    is_active: boolean;
+};
+
+type PageProps = {
+    balances: BalanceRow[];
+    employees: { id: number; label: string }[];
+    policy: Policy | null;
+    year: number;
+    leave_type: string;
+    filters: { year: string | number; employee_id: string | number };
+};
+
+const breadcrumbs: BreadcrumbItem[] = [
+    { title: 'Cuti', href: leavesIndex() },
+    { title: 'Jatah Cuti', href: '/hris/leaves/balances' },
+];
+
+const currentYear = new Date().getFullYear();
+const yearOptions = [
+    currentYear - 2,
+    currentYear - 1,
+    currentYear,
+    currentYear + 1,
+    currentYear + 2,
+];
+
+type PolicyFormData = {
+    leave_type: string;
+    policy_type: PolicyMethod;
+    yearly_days: string;
+    waiting_period_months: string;
+    min_notice_days: string;
+    max_days_per_request: string;
+    approval_levels: '1' | '2';
+    apply_to_all?: boolean;
+    year?: string | number;
+};
+
+type PolicyMethod = 'annual' | 'prorated' | 'monthly_accrual' | 'anniversary';
+
+const policyLabels: Record<PolicyMethod, string> = {
+    annual: 'Annual basis',
+    prorated: 'Prorata tanggal masuk',
+    monthly_accrual: 'Akumulasi bulanan',
+    anniversary: 'Anniversary basis',
+};
+
+const policyDescriptions: Record<PolicyMethod, string> = {
+    annual: 'Jatah diberikan penuh untuk setiap tahun kalender.',
+    prorated: 'Jatah tahun pertama mengikuti sisa bulan sejak tanggal masuk.',
+    monthly_accrual:
+        'Saldo bertambah per bulan dalam periode yang dimulai dari tanggal masuk.',
+    anniversary: 'Periode jatah mengikuti ulang tahun tanggal masuk karyawan.',
+};
+
+type AdjustFormData = {
+    amount: string;
+    description: string;
+};
+
+export default function BalancesPage() {
+    const { balances, employees, policy, year, leave_type, filters } =
+        usePage<PageProps>().props;
+
+    const [filterYear, setFilterYear] = useState(String(filters.year || year));
+    const [filterEmployee, setFilterEmployee] = useState(
+        filters.employee_id ? String(filters.employee_id) : '',
+    );
+
+    const [initDialogOpen, setInitDialogOpen] = useState(false);
+    const [initForceAll, setInitForceAll] = useState(true);
+    const [applyToAll, setApplyToAll] = useState(true);
+    const [accrueDialogOpen, setAccrueDialogOpen] = useState(false);
+    const [adjustDialogOpen, setAdjustDialogOpen] = useState(false);
+    const [adjustTarget, setAdjustTarget] = useState<BalanceRow | null>(null);
+
+    const policyForm = useForm<PolicyFormData>({
+        leave_type,
+        policy_type: policy?.policy_type ?? 'annual',
+        yearly_days: String(policy?.yearly_days ?? 12),
+        waiting_period_months: String(policy?.waiting_period_months ?? 0),
+        min_notice_days: String(policy?.min_notice_days ?? 0),
+        approval_levels: String(policy?.approval_levels ?? 1) as '1' | '2',
+        max_days_per_request:
+            policy?.max_days_per_request != null
+                ? String(policy.max_days_per_request)
+                : '',
+        apply_to_all: true,
+        year: filterYear,
+    });
+
+    const adjustForm = useForm<AdjustFormData>({
+        amount: '',
+        description: '',
+    });
+
+    const submitPolicy = (event: FormEvent<HTMLFormElement>) => {
+        event.preventDefault();
+        policyForm.transform((data) => ({
+            ...data,
+            leave_type,
+            apply_to_all: applyToAll,
+            year: filterYear,
+        }));
+
+        if (policy) {
+            policyForm.put(`/hris/leaves/policy/${policy.id}`, {
+                preserveScroll: true,
+            });
+        } else {
+            policyForm.post('/hris/leaves/policy', {
+                preserveScroll: true,
+            });
+        }
+    };
+
+    const applyFilter = () => {
+        router.get(
+            '/hris/leaves/balances',
+            {
+                year: filterYear,
+                employee_id: filterEmployee,
+                leave_type,
+            },
+            { preserveState: true, preserveScroll: true, replace: true },
+        );
+    };
+
+    const doInitialize = () => {
+        router.post(
+            '/hris/leaves/balances/initialize',
+            { year: filterYear, leave_type, force_all: initForceAll },
+            {
+                preserveScroll: true,
+                onSuccess: () => setInitDialogOpen(false),
+            },
+        );
+    };
+
+    const doAccrue = () => {
+        router.post(
+            '/hris/leaves/balances/accrue',
+            { year: filterYear, leave_type },
+            {
+                preserveScroll: true,
+                onSuccess: () => setAccrueDialogOpen(false),
+            },
+        );
+    };
+
+    const openAdjust = (row: BalanceRow) => {
+        setAdjustTarget(row);
+        adjustForm.reset();
+        adjustForm.clearErrors();
+        setAdjustDialogOpen(true);
+    };
+
+    const submitAdjust = (event: FormEvent<HTMLFormElement>) => {
+        event.preventDefault();
+        if (!adjustTarget) return;
+        adjustForm.transform((data) => ({
+            ...data,
+            year: filterYear,
+            leave_type,
+        }));
+        adjustForm.put(
+            `/hris/leaves/balances/${adjustTarget.employee_id}/adjust`,
+            {
+                preserveScroll: true,
+                onSuccess: () => {
+                    setAdjustDialogOpen(false);
+                    setAdjustTarget(null);
+                },
+            },
+        );
+    };
+
+    const totalEmployees = balances.filter((b) => b.has_balance).length;
+    const totalUsed = balances.reduce((acc, b) => acc + b.used_days, 0);
+    const totalRemaining = balances.reduce(
+        (acc, b) => acc + b.remaining_balance,
+        0,
+    );
+
+    return (
+        <AppLayout breadcrumbs={breadcrumbs}>
+            <Head title="Jatah Cuti" />
+
+            <div className="space-y-4 p-4">
+                {/* Back link */}
+                <div>
+                    <Button asChild variant="ghost" size="sm" className="-ml-2">
+                        <Link href={leavesIndex()}>
+                            <ArrowLeft className="size-4" />
+                            Kembali ke Pengajuan Cuti
+                        </Link>
+                    </Button>
+                </div>
+
+                {/* Section A: Policy Card */}
+                <Card>
+                    <CardHeader>
+                        <CardTitle className="flex items-center gap-2">
+                            <Settings2 className="size-4" />
+                            Kebijakan Cuti Tahunan
+                        </CardTitle>
+                        <CardDescription>
+                            Atur kebijakan jatah cuti untuk tipe:{' '}
+                            <strong>{leave_type}</strong>
+                        </CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                        <form
+                            onSubmit={submitPolicy}
+                            className="grid gap-4 md:grid-cols-2 xl:grid-cols-12"
+                        >
+                            <div className="grid gap-2 md:col-span-2 xl:col-span-4">
+                                <Label htmlFor="policy_type">
+                                    Jenis Kebijakan
+                                </Label>
+                                <Select
+                                    value={policyForm.data.policy_type}
+                                    onValueChange={(v) =>
+                                        policyForm.setData(
+                                            'policy_type',
+                                            v as PolicyMethod,
+                                        )
+                                    }
+                                >
+                                    <SelectTrigger
+                                        id="policy_type"
+                                        className="w-full"
+                                    >
+                                        <SelectValue />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                        <SelectItem value="annual">
+                                            Annual basis / tahunan
+                                        </SelectItem>
+                                        <SelectItem value="prorated">
+                                            Prorata tanggal masuk
+                                        </SelectItem>
+                                        <SelectItem value="monthly_accrual">
+                                            Monthly accrual
+                                        </SelectItem>
+                                        <SelectItem value="anniversary">
+                                            Anniversary basis
+                                        </SelectItem>
+                                    </SelectContent>
+                                </Select>
+                                <p className="text-xs text-muted-foreground">
+                                    {
+                                        policyDescriptions[
+                                            policyForm.data.policy_type
+                                        ]
+                                    }
+                                </p>
+                                <InputError
+                                    message={policyForm.errors.policy_type}
+                                />
+                            </div>
+
+                            <div className="grid content-start gap-2 md:col-span-1 xl:col-span-4">
+                                <Label htmlFor="yearly_days">
+                                    Jatah Hari / Tahun
+                                </Label>
+                                <div className="relative">
+                                    <Input
+                                        id="yearly_days"
+                                        type="number"
+                                        min={1}
+                                        className="pr-16"
+                                        value={policyForm.data.yearly_days}
+                                        onChange={(e) =>
+                                            policyForm.setData(
+                                                'yearly_days',
+                                                e.target.value,
+                                            )
+                                        }
+                                    />
+                                    <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-xs text-muted-foreground">
+                                        hari
+                                    </span>
+                                </div>
+                                <p className="text-xs text-muted-foreground">
+                                    Total kuota hak cuti dasar yang diberikan dalam satu tahun.
+                                </p>
+                                <InputError
+                                    message={policyForm.errors.yearly_days}
+                                />
+                            </div>
+
+                            <div className="grid content-start gap-2 md:col-span-1 xl:col-span-4">
+                                <Label htmlFor="waiting_period_months">
+                                    Bisa Diambil Setelah
+                                </Label>
+                                <div className="relative">
+                                    <Input
+                                        id="waiting_period_months"
+                                        type="number"
+                                        min={0}
+                                        max={120}
+                                        className="pr-16"
+                                        value={
+                                            policyForm.data
+                                                .waiting_period_months
+                                        }
+                                        onChange={(e) =>
+                                            policyForm.setData(
+                                                'waiting_period_months',
+                                                e.target.value,
+                                            )
+                                        }
+                                    />
+                                    <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-xs text-muted-foreground">
+                                        bulan
+                                    </span>
+                                </div>
+                                <p className="text-xs text-muted-foreground">
+                                    Masa tunggu sejak tanggal masuk kerja (probation).
+                                </p>
+                                <InputError
+                                    message={
+                                        policyForm.errors.waiting_period_months
+                                    }
+                                />
+                            </div>
+
+                            <div className="grid content-start gap-2 md:col-span-1 xl:col-span-4">
+                                <Label htmlFor="min_notice_days">
+                                    Batas Pengajuan Cuti
+                                </Label>
+                                <div className="relative">
+                                    <Input
+                                        id="min_notice_days"
+                                        type="number"
+                                        min={0}
+                                        max={90}
+                                        className="pr-24"
+                                        placeholder="0"
+                                        value={policyForm.data.min_notice_days}
+                                        onChange={(e) =>
+                                            policyForm.setData(
+                                                'min_notice_days',
+                                                e.target.value,
+                                            )
+                                        }
+                                    />
+                                    <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-xs text-muted-foreground">
+                                        hari kerja
+                                    </span>
+                                </div>
+                                <p className="text-xs text-muted-foreground">
+                                    Minimal waktu pengajuan (hari kerja, lewati libur &amp; akhir pekan). Kosongkan/0 jika bebas.
+                                </p>
+                                <InputError
+                                    message={policyForm.errors.min_notice_days}
+                                />
+                            </div>
+
+                            <div className="grid content-start gap-2 md:col-span-1 xl:col-span-4">
+                                <Label htmlFor="max_days">
+                                    Batas per Pengajuan
+                                </Label>
+                                <div className="relative">
+                                    <Input
+                                        id="max_days"
+                                        type="number"
+                                        min={1}
+                                        className="pr-16"
+                                        placeholder="Tidak dibatasi"
+                                        value={policyForm.data.max_days_per_request}
+                                        onChange={(e) =>
+                                            policyForm.setData(
+                                                'max_days_per_request',
+                                                e.target.value,
+                                            )
+                                        }
+                                    />
+                                    <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-xs text-muted-foreground">
+                                        hari
+                                    </span>
+                                </div>
+                                <p className="text-xs text-muted-foreground">
+                                    Batas maksimal durasi hari cuti untuk 1 kali submit formulir.
+                                </p>
+                                <InputError
+                                    message={
+                                        policyForm.errors.max_days_per_request
+                                    }
+                                />
+                            </div>
+
+                            <div className="grid content-start gap-2 md:col-span-2 xl:col-span-4">
+                                <Label htmlFor="approval_levels">
+                                    Tahap Approval
+                                </Label>
+                                <Select
+                                    value={policyForm.data.approval_levels}
+                                    onValueChange={(value) =>
+                                        policyForm.setData(
+                                            'approval_levels',
+                                            value as '1' | '2',
+                                        )
+                                    }
+                                >
+                                    <SelectTrigger
+                                        id="approval_levels"
+                                        className="w-full"
+                                    >
+                                        <SelectValue />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                        <SelectItem value="1">
+                                            1 tingkat
+                                        </SelectItem>
+                                        <SelectItem value="2">
+                                            2 tingkat
+                                        </SelectItem>
+                                    </SelectContent>
+                                </Select>
+                                <p className="text-xs text-muted-foreground">
+                                    Jumlah tingkatan persetujuan berjenjang sebelum disetujui resmi.
+                                </p>
+                                <InputError
+                                    message={policyForm.errors.approval_levels}
+                                />
+                            </div>
+
+                            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between border-t pt-4 md:col-span-2 xl:col-span-12">
+                                <label className="flex items-center gap-2 text-sm text-muted-foreground cursor-pointer select-none">
+                                    <input
+                                        type="checkbox"
+                                        checked={applyToAll}
+                                        onChange={(e) => setApplyToAll(e.target.checked)}
+                                        className="size-4 rounded border-gray-300 text-primary focus:ring-primary"
+                                    />
+                                    <span>
+                                        Terapkan metode ini ke seluruh karyawan untuk tahun <strong>{filterYear}</strong>
+                                    </span>
+                                </label>
+                                <Button
+                                    type="submit"
+                                    disabled={policyForm.processing}
+                                >
+                                    <CheckCircle className="size-4" />
+                                    Simpan &amp; Terapkan Kebijakan
+                                </Button>
+                            </div>
+                        </form>
+                    </CardContent>
+                </Card>
+
+                {/* Section B: Toolbar */}
+                <Card>
+                    <CardHeader>
+                        <CardTitle className="flex items-center gap-2">
+                            <SlidersHorizontal className="size-4" />
+                            Filter &amp; Aksi
+                        </CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                        <div className="flex flex-wrap items-end gap-3">
+                            <div className="grid gap-2">
+                                <Label htmlFor="filter_year">Tahun</Label>
+                                <Select
+                                    value={filterYear}
+                                    onValueChange={(v) => setFilterYear(v)}
+                                >
+                                    <SelectTrigger
+                                        id="filter_year"
+                                        className="w-32"
+                                    >
+                                        <SelectValue />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                        {yearOptions.map((y) => (
+                                            <SelectItem
+                                                key={y}
+                                                value={String(y)}
+                                            >
+                                                {y}
+                                            </SelectItem>
+                                        ))}
+                                    </SelectContent>
+                                </Select>
+                            </div>
+
+                            <div className="grid gap-2">
+                                <Label htmlFor="filter_emp">Karyawan</Label>
+                                <SearchableSelect
+                                    id="filter_emp"
+                                    value={
+                                        filterEmployee === ''
+                                            ? '__all'
+                                            : filterEmployee
+                                    }
+                                    onValueChange={(v) =>
+                                        setFilterEmployee(
+                                            v === '__all' ? '' : v,
+                                        )
+                                    }
+                                    placeholder="Semua"
+                                    searchPlaceholder="Cari karyawan..."
+                                    options={[
+                                        {
+                                            value: '__all',
+                                            label: 'Semua karyawan',
+                                        },
+                                        ...employees.map((e) => ({
+                                            value: String(e.id),
+                                            label: e.label,
+                                        })),
+                                    ]}
+                                    className="w-56"
+                                />
+                            </div>
+
+                            <Button onClick={applyFilter}>
+                                <RefreshCw className="size-4" />
+                                Terapkan Filter
+                            </Button>
+
+                            <div className="ml-auto flex gap-2">
+                                <Button
+                                    variant="outline"
+                                    onClick={() => setInitDialogOpen(true)}
+                                >
+                                    <Plus className="size-4" />
+                                    Inisialisasi Jatah
+                                </Button>
+
+                                {policy?.policy_type === 'monthly_accrual' && (
+                                    <Button
+                                        variant="outline"
+                                        onClick={() =>
+                                            setAccrueDialogOpen(true)
+                                        }
+                                    >
+                                        <Play className="size-4" />
+                                        Jalankan Akrual Manual
+                                    </Button>
+                                )}
+                            </div>
+                        </div>
+                    </CardContent>
+                </Card>
+
+                {/* Section C: Balance Table */}
+                <Card>
+                    <CardHeader>
+                        <CardTitle className="flex items-center gap-2">
+                            <BookOpen className="size-4" />
+                            Saldo Cuti Karyawan
+                        </CardTitle>
+                        <CardDescription>
+                            Tahun {filterYear} &mdash; Tipe: {leave_type}
+                        </CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                        <div className="overflow-x-auto">
+                            <table className="w-full min-w-[900px] text-sm">
+                                <thead>
+                                    <tr className="border-b text-left">
+                                        <th className="px-3 py-2">Karyawan</th>
+                                        <th className="px-3 py-2">
+                                            Jenis Kebijakan
+                                        </th>
+                                        <th className="px-3 py-2">
+                                            Jatah / Akrual
+                                        </th>
+                                        <th className="px-3 py-2">Terpakai</th>
+                                        <th className="px-3 py-2">Adjusted</th>
+                                        <th className="px-3 py-2">Sisa</th>
+                                        <th className="px-3 py-2">Aksi</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {balances.length === 0 && (
+                                        <tr>
+                                            <td
+                                                colSpan={7}
+                                                className="px-3 py-6 text-center text-muted-foreground"
+                                            >
+                                                Belum ada data saldo cuti.
+                                            </td>
+                                        </tr>
+                                    )}
+                                    {balances.map((row) => (
+                                        <tr
+                                            key={row.employee_id}
+                                            className="border-b align-middle"
+                                        >
+                                            <td className="px-3 py-3">
+                                                <div className="font-medium">
+                                                    {row.employee_label}
+                                                </div>
+                                                {!row.has_balance && (
+                                                    <Badge
+                                                        variant="outline"
+                                                        className="mt-1 border-amber-400 text-xs text-amber-600"
+                                                    >
+                                                        <AlertTriangle className="mr-1 size-3" />
+                                                        Belum diinisialisasi
+                                                    </Badge>
+                                                )}
+                                            </td>
+                                            <td className="px-3 py-3">
+                                                <Badge variant="secondary">
+                                                    {policyLabels[
+                                                        row.policy_type
+                                                    ] ?? row.policy_type}
+                                                </Badge>
+                                            </td>
+                                            <td className="px-3 py-3">
+                                                {row.policy_type !==
+                                                'monthly_accrual' ? (
+                                                    <span>
+                                                        {row.total_quota} hari
+                                                    </span>
+                                                ) : (
+                                                    <span>
+                                                        {row.accrued_days}/
+                                                        {policy?.yearly_days ??
+                                                            row.total_quota}{' '}
+                                                        hari
+                                                    </span>
+                                                )}
+                                                {row.period_start &&
+                                                    row.period_end && (
+                                                        <div className="mt-1 text-xs text-muted-foreground">
+                                                            {row.period_start} -{' '}
+                                                            {row.period_end}
+                                                        </div>
+                                                    )}
+                                            </td>
+                                            <td className="px-3 py-3">
+                                                {row.used_days} hari
+                                            </td>
+                                            <td className="px-3 py-3">
+                                                {row.adjusted_days !== 0 && (
+                                                    <span
+                                                        className={
+                                                            row.adjusted_days >
+                                                            0
+                                                                ? 'text-green-600'
+                                                                : 'text-red-600'
+                                                        }
+                                                    >
+                                                        {row.adjusted_days > 0
+                                                            ? '+'
+                                                            : ''}
+                                                        {row.adjusted_days}
+                                                    </span>
+                                                )}
+                                                {row.adjusted_days === 0 && (
+                                                    <span className="text-muted-foreground">
+                                                        —
+                                                    </span>
+                                                )}
+                                            </td>
+                                            <td className="px-3 py-3">
+                                                <Badge
+                                                    variant={
+                                                        row.remaining_balance >
+                                                        0
+                                                            ? 'default'
+                                                            : 'destructive'
+                                                    }
+                                                    className={
+                                                        row.remaining_balance >
+                                                        0
+                                                            ? 'bg-green-100 text-green-800 hover:bg-green-100'
+                                                            : ''
+                                                    }
+                                                >
+                                                    {row.remaining_balance} hari
+                                                </Badge>
+                                            </td>
+                                            <td className="px-3 py-3">
+                                                <div className="flex gap-1.5">
+                                                    <Button
+                                                        size="sm"
+                                                        variant="outline"
+                                                        onClick={() =>
+                                                            openAdjust(row)
+                                                        }
+                                                    >
+                                                        <SlidersHorizontal className="size-3.5" />
+                                                        Sesuaikan
+                                                    </Button>
+                                                    <Button
+                                                        asChild
+                                                        size="sm"
+                                                        variant="outline"
+                                                    >
+                                                        <Link
+                                                            href={`/hris/leaves/balances/${row.employee_id}/ledger?year=${filterYear}&leave_type=${leave_type}`}
+                                                        >
+                                                            <History className="size-3.5" />
+                                                            Riwayat
+                                                        </Link>
+                                                    </Button>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </CardContent>
+                </Card>
+
+                {/* Section D: Summary Cards */}
+                <div className="grid gap-4 md:grid-cols-3">
+                    <Card className="gap-2 py-3">
+                        <CardHeader className="px-4 pb-0">
+                            <CardDescription>
+                                Karyawan dengan Jatah
+                            </CardDescription>
+                            <CardTitle className="text-2xl">
+                                {totalEmployees}
+                            </CardTitle>
+                        </CardHeader>
+                    </Card>
+                    <Card className="gap-2 py-3">
+                        <CardHeader className="px-4 pb-0">
+                            <CardDescription>
+                                Total Hari Terpakai
+                            </CardDescription>
+                            <CardTitle className="text-2xl">
+                                {totalUsed}
+                            </CardTitle>
+                        </CardHeader>
+                    </Card>
+                    <Card className="gap-2 py-3">
+                        <CardHeader className="px-4 pb-0">
+                            <CardDescription>Total Hari Sisa</CardDescription>
+                            <CardTitle className="text-2xl">
+                                {totalRemaining}
+                            </CardTitle>
+                        </CardHeader>
+                    </Card>
+                </div>
+            </div>
+
+            {/* Dialog: Konfirmasi Inisialisasi */}
+            <Dialog open={initDialogOpen} onOpenChange={setInitDialogOpen}>
+                <DialogContent className="sm:max-w-md">
+                    <DialogHeader>
+                        <DialogTitle>Inisialisasi &amp; Terapkan Jatah Cuti</DialogTitle>
+                        <DialogDescription>
+                            Pilih cakupan penerapan kebijakan jatah cuti untuk tahun{' '}
+                            <strong>{filterYear}</strong>:
+                        </DialogDescription>
+                    </DialogHeader>
+                    <div className="space-y-3 py-2 text-sm">
+                        <label className="flex items-start gap-2.5 cursor-pointer select-none rounded-md border p-3 hover:bg-muted/50">
+                            <input
+                                type="radio"
+                                name="init_scope"
+                                checked={initForceAll}
+                                onChange={() => setInitForceAll(true)}
+                                className="mt-0.5 size-4 text-primary focus:ring-primary"
+                            />
+                            <div>
+                                <div className="font-medium text-foreground">
+                                    Terapkan ke seluruh karyawan
+                                </div>
+                                <div className="text-xs text-muted-foreground mt-0.5">
+                                    Perbarui jenis kebijakan dan sinkronkan kuota semua karyawan aktif. Pemakaian cuti sebelumnya tetap dipertahankan.
+                                </div>
+                            </div>
+                        </label>
+                        <label className="flex items-start gap-2.5 cursor-pointer select-none rounded-md border p-3 hover:bg-muted/50">
+                            <input
+                                type="radio"
+                                name="init_scope"
+                                checked={!initForceAll}
+                                onChange={() => setInitForceAll(false)}
+                                className="mt-0.5 size-4 text-primary focus:ring-primary"
+                            />
+                            <div>
+                                <div className="font-medium text-foreground">
+                                    Hanya karyawan yang belum memiliki saldo
+                                </div>
+                                <div className="text-xs text-muted-foreground mt-0.5">
+                                    Hanya membuat entri baru bagi karyawan yang belum memiliki catatan saldo di tahun {filterYear}.
+                                </div>
+                            </div>
+                        </label>
+                    </div>
+                    <DialogFooter>
+                        <Button
+                            variant="outline"
+                            onClick={() => setInitDialogOpen(false)}
+                        >
+                            Batal
+                        </Button>
+                        <Button onClick={doInitialize}>
+                            <CheckCircle className="size-4" />
+                            {initForceAll ? 'Ya, Terapkan ke Seluruh Karyawan' : 'Ya, Inisialisasi'}
+                        </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
+
+            {/* Dialog: Konfirmasi Akrual Manual */}
+            <Dialog open={accrueDialogOpen} onOpenChange={setAccrueDialogOpen}>
+                <DialogContent className="sm:max-w-md">
+                    <DialogHeader>
+                        <DialogTitle>Jalankan Akrual Manual</DialogTitle>
+                        <DialogDescription>
+                            Tindakan ini akan mengakumulasikan saldo cuti bulan
+                            ini untuk semua karyawan dengan kebijakan Accrual di
+                            tahun <strong>{filterYear}</strong>. Lanjutkan?
+                        </DialogDescription>
+                    </DialogHeader>
+                    <DialogFooter>
+                        <Button
+                            variant="outline"
+                            onClick={() => setAccrueDialogOpen(false)}
+                        >
+                            Batal
+                        </Button>
+                        <Button onClick={doAccrue}>
+                            <Play className="size-4" />
+                            Ya, Jalankan
+                        </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
+
+            {/* Dialog: Adjust Balance */}
+            <Dialog
+                open={adjustDialogOpen}
+                onOpenChange={(open) => {
+                    setAdjustDialogOpen(open);
+                    if (!open) {
+                        setAdjustTarget(null);
+                        adjustForm.reset();
+                        adjustForm.clearErrors();
+                    }
+                }}
+            >
+                <DialogContent className="sm:max-w-md">
+                    <DialogHeader>
+                        <DialogTitle>Sesuaikan Saldo Cuti</DialogTitle>
+                        <DialogDescription>
+                            {adjustTarget?.employee_label}
+                        </DialogDescription>
+                    </DialogHeader>
+                    <form onSubmit={submitAdjust} className="grid gap-4">
+                        <div className="grid gap-2">
+                            <Label htmlFor="adjust_amount">
+                                Jumlah Penyesuaian
+                                <span className="ml-1 text-xs text-muted-foreground">
+                                    (positif = tambah, negatif = kurangi)
+                                </span>
+                            </Label>
+                            <Input
+                                id="adjust_amount"
+                                type="number"
+                                placeholder="Contoh: 2 atau -1"
+                                value={adjustForm.data.amount}
+                                onChange={(e) =>
+                                    adjustForm.setData('amount', e.target.value)
+                                }
+                                required
+                            />
+                            <InputError message={adjustForm.errors.amount} />
+                        </div>
+                        <div className="grid gap-2">
+                            <Label htmlFor="adjust_desc">Keterangan</Label>
+                            <Input
+                                id="adjust_desc"
+                                placeholder="Alasan penyesuaian..."
+                                value={adjustForm.data.description}
+                                onChange={(e) =>
+                                    adjustForm.setData(
+                                        'description',
+                                        e.target.value,
+                                    )
+                                }
+                            />
+                            <InputError
+                                message={adjustForm.errors.description}
+                            />
+                        </div>
+                        <DialogFooter>
+                            <Button
+                                type="button"
+                                variant="outline"
+                                onClick={() => setAdjustDialogOpen(false)}
+                            >
+                                Batal
+                            </Button>
+                            <Button
+                                type="submit"
+                                disabled={adjustForm.processing}
+                            >
+                                Simpan
+                            </Button>
+                        </DialogFooter>
+                    </form>
+                </DialogContent>
+            </Dialog>
+        </AppLayout>
+    );
+}

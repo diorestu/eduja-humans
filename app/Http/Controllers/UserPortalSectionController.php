@@ -1,0 +1,339 @@
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Models\CompanySetting;
+use App\Models\Employee;
+use App\Models\PayrollItem;
+use App\Models\PayrollRun;
+use App\Models\User;
+use App\Services\PayslipPdfService;
+use App\Support\RoleRedirect;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\Request;
+use Illuminate\Http\Request as HttpRequest;
+use Illuminate\Http\Response as HttpResponse;
+use Inertia\Inertia;
+use Inertia\Response;
+
+class UserPortalSectionController extends Controller
+{
+    public function attendance(Request $request): Response|RedirectResponse
+    {
+        return $this->renderForUser($request, 'portal/attendance', 'Jadwal');
+    }
+
+    public function checkIn(Request $request): Response|RedirectResponse
+    {
+        return $this->renderForUser($request, 'portal/check-in', 'Absensi');
+    }
+
+    public function checkOut(Request $request): Response|RedirectResponse
+    {
+        return $this->renderForUser($request, 'portal/check-out', 'Pulang');
+    }
+
+    public function shiftChange(Request $request): Response|RedirectResponse
+    {
+        return $this->renderForUser($request, 'portal/shift-change', 'Ubah Jadwal');
+    }
+
+    public function attendanceRequest(Request $request): Response|RedirectResponse
+    {
+        return $this->renderForUser($request, 'portal/attendance-request', 'Request Absensi');
+    }
+
+    public function backupAttendance(Request $request): Response|RedirectResponse
+    {
+        abort_unless(CompanySetting::backupAttendanceEnabledFor($request->user()), 404);
+
+        return $this->renderForUser($request, 'portal/backup-attendance', 'Backup');
+    }
+
+    public function leaves(Request $request): Response|RedirectResponse
+    {
+        return $this->renderForUser($request, 'portal/leaves', 'Leave');
+    }
+
+    public function overtimes(Request $request): Response|RedirectResponse
+    {
+        return $this->renderForUser($request, 'portal/overtimes', 'Overtime');
+    }
+
+    public function kasbons(Request $request): Response|RedirectResponse
+    {
+        abort_unless(CompanySetting::portalKasbonEnabledFor($request->user()), 404);
+
+        return $this->renderForUser($request, 'portal/kasbons', 'Kasbon');
+    }
+
+    public function reimbursements(Request $request): Response|RedirectResponse
+    {
+        return $this->renderForUser($request, 'portal/reimbursements', 'Reimbursement');
+    }
+
+    public function payroll(Request $request): Response|RedirectResponse
+    {
+        return $this->renderForUser($request, 'portal/payroll', 'Payroll');
+    }
+
+    public function activity(Request $request): Response|RedirectResponse
+    {
+        return $this->renderForUser($request, 'portal/activity', 'Aktivitas');
+    }
+
+    public function clientVisits(Request $request): Response|RedirectResponse
+    {
+        return $this->renderForUser($request, 'portal/client-visits', 'Client Visit');
+    }
+
+    public function performanceActivity(Request $request): Response|RedirectResponse
+    {
+        return $this->renderForUser($request, 'portal/performance-activity', 'Performance');
+    }
+
+    public function profile(Request $request): Response|RedirectResponse
+    {
+        return $this->renderForUser($request, 'portal/profile', 'Profile');
+    }
+
+    public function announcements(Request $request): Response|RedirectResponse
+    {
+        return $this->renderForUser($request, 'portal/announcements', 'Announcements');
+    }
+
+    public function surveys(Request $request): Response|RedirectResponse
+    {
+        return $this->renderForUser($request, 'portal/surveys', 'Surveys');
+    }
+
+    public function assets(Request $request): Response|RedirectResponse
+    {
+        return $this->renderForUser($request, 'portal/assets', 'Assets');
+    }
+
+    public function reprimands(Request $request): Response|RedirectResponse
+    {
+        return $this->renderForUser($request, 'portal/reprimands', 'Teguran');
+    }
+
+    public function approvals(Request $request): Response|RedirectResponse
+    {
+        /** @var User $user */
+        $user = $request->user();
+        $employee = $this->resolveSelfServiceEmployee($user);
+        abort_unless($employee && app(\App\Services\ApprovalWorkflowService::class)->hasApprovalLine($employee), 404);
+
+        return $this->renderForUser($request, 'portal/approvals', 'Approval');
+    }
+
+    public function previewPayslip(Request $request): JsonResponse|RedirectResponse
+    {
+        /** @var User $user */
+        $user = $request->user();
+
+        if ($user->role !== 'user') {
+            return redirect()->to(RoleRedirect::for($user));
+        }
+
+        $validated = $request->validate([
+            'period' => ['required', 'date_format:Y-m'],
+            'current_password' => ['required', 'string', 'current_password'],
+            'run_id' => ['nullable', 'integer'],
+        ]);
+
+        $employee = $this->resolveSelfServiceEmployee($user);
+        abort_unless($employee !== null, 404);
+
+        $run = $this->findPayrollRunForEmployee($employee, $validated['period'], $validated['run_id'] ?? null);
+
+        abort_if(isset($validated['run_id']) && ! $run, 404);
+
+        if ($run && ! $run->isReleased() && ! $run->is_saved) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Slip gaji periode ini masih berstatus draft dan belum dirilis oleh admin.',
+                'data' => $this->payrollPreviewPayload($validated['period'], null, $employee),
+            ], 422);
+        }
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Slip gaji berhasil diverifikasi.',
+            'data' => $this->payrollPreviewPayload($validated['period'], $run, $employee),
+        ]);
+    }
+
+    public function exportPayslip(HttpRequest $request, PayslipPdfService $payslipPdfService): HttpResponse|RedirectResponse
+    {
+        /** @var User $user */
+        $user = $request->user();
+
+        if ($user->role !== 'user') {
+            return redirect()->to(RoleRedirect::for($user));
+        }
+
+        $validated = $request->validate([
+            'period' => ['required', 'date_format:Y-m'],
+            'current_password' => ['required', 'string', 'current_password'],
+            'run_id' => ['nullable', 'integer'],
+        ]);
+
+        $period = $validated['period'];
+        $employee = $this->resolveSelfServiceEmployee($user);
+
+        abort_unless($employee !== null, 404);
+
+        $run = $this->findPayrollRunForEmployee($employee, $period, $validated['run_id'] ?? null);
+
+        abort_unless($run !== null && ($run->isReleased() || $run->is_saved) && $run->items->isNotEmpty(), 404);
+
+        $slip = $run->items->first();
+
+        return $payslipPdfService->download($run, $slip, $user->accountOwnerId());
+    }
+
+    private function findPayrollRunForEmployee(Employee $employee, string $period, ?int $runId = null): ?PayrollRun
+    {
+        return PayrollRun::query()
+            ->with([
+                'items' => fn ($query) => $query
+                    ->where('employee_id', $employee->id)
+                    ->with('employee:id,employee_code,first_name,last_name,division_id,position_id'),
+                'items.employee.division:id,name',
+                'items.employee.position:id,name',
+            ])
+            ->where('user_id', $employee->user_id)
+            ->where('period', $period)
+            ->whereHas('items', fn ($q) => $q->where('employee_id', $employee->id))
+            ->when($runId, fn ($q) => $q->whereKey($runId))
+            ->orderByRaw("CASE WHEN status = 'released' OR is_saved = 1 THEN 1 ELSE 0 END DESC")->latest('id')->first();
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function payrollPreviewPayload(string $period, ?PayrollRun $run, Employee $employee): array
+    {
+        $items = $run?->items
+            ? $run->items->where('employee_id', $employee->id)->values()
+            : collect();
+
+        $eventOvertimes = collect();
+        if ($run && $run->batch_purpose !== 'additional' && $run->period_start && $run->period_end) {
+            $eventOvertimes = \App\Models\OvertimeRequest::query()
+                ->where('employee_id', $employee->id)
+                ->where('is_event', true)
+                ->where('status', 'approved')
+                ->whereBetween('work_date', [$run->period_start->toDateString(), $run->period_end->toDateString()])
+                ->orderBy('work_date')
+                ->get()
+                ->map(fn ($ot) => [
+                    'id' => $ot->id,
+                    'event_name' => $ot->event_name,
+                    'event_nominal' => (float) ($ot->event_nominal ?? 0),
+                    'total_hours' => (float) $ot->total_hours,
+                    'work_date' => $ot->work_date?->format('Y-m-d'),
+                ]);
+        }
+
+        return [
+            'period' => $period,
+            'batches' => PayrollRun::query()->where('user_id', $employee->user_id)->where('period', $period)->released()->whereHas('items', fn ($q) => $q->where('employee_id', $employee->id))->latest('id')->get(['id', 'code', 'batch_purpose', 'period', 'type']),
+            'run' => $run ? [
+                'id' => $run->id,
+                'code' => $run->code,
+                'type' => $run->type,
+                'batch_purpose' => $run->batch_purpose,
+                'period' => $run->period,
+                'period_start' => $run->period_start?->format('Y-m-d'),
+                'period_end' => $run->period_end?->format('Y-m-d'),
+                'generated_at' => $run->generated_at?->toDateTimeString(),
+                'is_saved' => $run->is_saved,
+            ] : null,
+            'items' => $items->map(fn (PayrollItem $item) => [
+                'id' => $item->id,
+                'employee_id' => $item->employee_id,
+                'employee_label' => $item->employee
+                    ? $item->employee->employee_code.' - '.$item->employee->full_name
+                    : '-',
+                'base_salary' => $item->base_salary,
+                'allowances_total' => $item->allowances_total,
+                'overtime_hours' => $item->overtime_hours,
+                'overtime_pay' => $item->overtime_pay,
+                'event_overtimes' => $eventOvertimes,
+                'pph21_method' => $item->pph21_method,
+                'pph21_rate' => $item->pph21_rate,
+                'pph21_allowance' => $item->pph21_allowance,
+                'pph21_deduction' => $item->pph21_deduction,
+                'pph21_company_borne' => $item->pph21_company_borne,
+                'bpjs_kesehatan_company' => $item->bpjs_kesehatan_company,
+                'bpjs_kesehatan_employee' => $item->bpjs_kesehatan_employee,
+                'bpjs_kesehatan_class' => $item->bpjs_kesehatan_class,
+                'bpjs_jkk_company' => $item->bpjs_jkk_company,
+                'bpjs_jkm_company' => $item->bpjs_jkm_company,
+                'bpjs_jht_company' => $item->bpjs_jht_company,
+                'bpjs_jht_employee' => $item->bpjs_jht_employee,
+                'bpjs_jp_company' => $item->bpjs_jp_company,
+                'bpjs_jp_employee' => $item->bpjs_jp_employee,
+                'bpjs_total_company' => $item->bpjs_total_company,
+                'bpjs_total_employee' => $item->bpjs_total_employee,
+                'private_insurance_name' => $item->private_insurance_name,
+                'private_insurance_nominal' => $item->private_insurance_nominal,
+                'kasbon_deduction' => $item->kasbon_deduction,
+                'denda_deduction' => $item->denda_deduction,
+                'unpaid_leave_deduction' => $item->unpaid_leave_deduction,
+                'manual_deduction_total' => (float) ($item->manual_deduction_total ?? 0),
+                'manual_deduction_breakdown' => $item->manual_deduction_breakdown ?? [],
+                'deductions_total' => $item->deductions_total,
+                'net_salary' => $item->net_salary,
+                'allowance_breakdown' => $item->allowance_breakdown ?? [],
+                'variable_allowance_breakdown' => $item->variable_allowance_breakdown ?? [],
+                'bonus_breakdown' => $item->bonus_breakdown ?? [],
+            ])->values(),
+        ];
+    }
+
+    private function renderForUser(Request $request, string $page, string $title): Response|RedirectResponse
+    {
+        /** @var User $user */
+        $user = $request->user();
+
+        if ($user->role !== 'user') {
+            return redirect()->to(RoleRedirect::for($user));
+        }
+
+        return Inertia::render($page, [
+            'pageTitle' => $title,
+        ]);
+    }
+
+    private function resolveSelfServiceEmployee(User $user): ?Employee
+    {
+        if ($user->employee_id) {
+            $employee = Employee::query()->find($user->employee_id);
+            if ($employee) {
+                return $employee;
+            }
+        }
+
+        if (! $user->email && ! $user->phone) {
+            return null;
+        }
+
+        return Employee::query()
+            ->where(function ($query) use ($user): void {
+                if ($user->email && ! str_ends_with($user->email, '@local.portal')) {
+                    $query->where('email', $user->email);
+                }
+
+                if ($user->phone) {
+                    $user->email && ! str_ends_with($user->email, '@local.portal')
+                        ? $query->orWhere('phone', $user->phone)
+                        : $query->where('phone', $user->phone);
+                }
+            })
+            ->first();
+    }
+}

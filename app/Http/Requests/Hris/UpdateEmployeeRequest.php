@@ -1,0 +1,320 @@
+<?php
+
+namespace App\Http\Requests\Hris;
+
+use App\Models\Employee;
+use App\Models\Position;
+use App\Support\FixedAllowanceAmount;
+use App\Support\WhatsAppPhone;
+use Illuminate\Contracts\Validation\ValidationRule;
+use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Rule;
+
+class UpdateEmployeeRequest extends FormRequest
+{
+    /**
+     * Determine if the user is authorized to make this request.
+     */
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    /**
+     * Prepare request data for validation.
+     */
+    protected function prepareForValidation(): void
+    {
+        $normalizedPayload = [];
+
+        if ($this->has('full_name')) {
+            $fullName = Employee::formatCapitalizedWords(trim((string) $this->input('full_name'))) ?? '';
+            $normalizedPayload['full_name'] = $fullName;
+            $normalizedPayload['first_name'] = $fullName;
+            $normalizedPayload['last_name'] = null;
+        }
+
+        if ($this->has('employee_code')) {
+            $normalizedPayload['employee_code'] = strtoupper((string) $this->input('employee_code'));
+        }
+
+        if ($this->input('sub_company_id') === '') {
+            $normalizedPayload['sub_company_id'] = null;
+        }
+
+        $user = $this->user();
+        $subCompanyScopeIds = $user && $user->parent_user_id && $user->role !== 'user'
+            ? $user->subCompanyScopeIds()
+            : null;
+
+        if (
+            $subCompanyScopeIds !== null
+            && count($subCompanyScopeIds) === 1
+            && ($this->input('sub_company_id') === '' || $this->input('sub_company_id') === null)
+        ) {
+            $normalizedPayload['sub_company_id'] = $subCompanyScopeIds[0];
+        }
+
+        if ($this->has('employment_type')) {
+            $normalizedPayload['employment_type'] = $this->normalizeEmploymentType(
+                $this->input('employment_type')
+            );
+        }
+
+        if (($this->input('marital_status') ?? '') === 'single') {
+            $normalizedPayload['children_count'] = 0;
+        }
+
+        if ($this->has('base_salary')) {
+            $normalizedPayload['base_salary'] = $this->normalizeCurrencyInput(
+                $this->input('base_salary')
+            );
+        }
+
+        if ($this->has('daily_wage')) {
+            $normalizedPayload['daily_wage'] = $this->normalizeCurrencyInput($this->input('daily_wage'));
+        }
+
+        if ($this->has('bpjs_kesehatan_reported_wage')) {
+            $normalizedPayload['bpjs_kesehatan_reported_wage'] = $this->normalizeCurrencyInput(
+                $this->input('bpjs_kesehatan_reported_wage')
+            );
+        }
+
+        if ($this->has('fixed_allowances')) {
+            $normalizedPayload['fixed_allowances'] = collect($this->input('fixed_allowances', []))
+                ->map(function (mixed $allowance): mixed {
+                    if (! is_array($allowance)) {
+                        return $allowance;
+                    }
+
+                    $allowance['amount'] = FixedAllowanceAmount::normalize($allowance['amount'] ?? null);
+
+                    return $allowance;
+                })
+                ->all();
+        }
+
+        if ($this->filled('phone')) {
+            $normalizedPayload['phone'] = WhatsAppPhone::normalize((string) $this->input('phone'));
+        }
+
+        if ($this->filled('emergency_contact_phone')) {
+            $normalizedPayload['emergency_contact_phone'] = WhatsAppPhone::normalize((string) $this->input('emergency_contact_phone'));
+        }
+
+        if ($this->has('pph21_method') && in_array($this->input('pph21_method'), ['ter_bulanan', 'ter_bulanan_net', 'ter_bulanan_gross_up'], true)) {
+            if (! $this->filled('pph21_rate')) {
+                $normalizedPayload['pph21_rate'] = 0;
+            }
+            if (! $this->filled('ptkp_category')) {
+                $normalizedPayload['ptkp_category'] = 'TK/0';
+            }
+        }
+
+        if ($normalizedPayload !== []) {
+            $this->merge($normalizedPayload);
+        }
+    }
+
+    /**
+     * Get the validation rules that apply to the request.
+     *
+     * @return array<string, ValidationRule|array<mixed>|string>
+     */
+    public function rules(): array
+    {
+        /** @var Employee $employee */
+        $employee = $this->route('employee');
+        $user = $this->user();
+        $ownerId = $user->accountOwnerId();
+        $subCompanyScopeIds = $user->parent_user_id && $user->role !== 'user'
+            ? $user->subCompanyScopeIds()
+            : null;
+
+        return [
+            'full_name' => ['required', 'string', 'max:150'],
+            'employee_code' => [
+                'required',
+                'string',
+                'max:30',
+                'regex:/^[A-Z0-9_-]+$/',
+                Rule::unique('employees', 'employee_code')
+                    ->where('user_id', $ownerId)
+                    ->ignore($employee->id),
+            ],
+            'first_name' => ['nullable', 'string', 'max:100'],
+            'last_name' => ['nullable', 'string', 'max:100'],
+            'email' => [
+                'nullable',
+                'email',
+                'max:150',
+                Rule::unique('employees', 'email')
+                    ->where('user_id', $ownerId)
+                    ->ignore($employee->id),
+            ],
+            'phone' => ['nullable', 'string', 'max:30'],
+            'gender' => ['nullable', Rule::in(['male', 'female', 'other'])],
+            'birth_place' => ['nullable', 'string', 'max:150'],
+            'birth_date' => ['nullable', 'date'],
+            'last_education' => ['nullable', 'string', 'max:100'],
+            'marital_status' => ['nullable', Rule::in(['single', 'married', 'divorced', 'widowed'])],
+            'children_count' => ['nullable', 'integer', 'min:0'],
+            'hire_date' => ['required', 'date'],
+            'employment_status' => ['required', Rule::in(['active', 'probation', 'on_leave', 'resigned'])],
+            'employment_type' => ['required', Rule::in(Employee::EMPLOYMENT_TYPES)],
+            'daily_wage' => ['nullable', 'numeric', 'min:0', Rule::requiredIf(fn () => $this->input('employment_type') === 'DW')],
+            'service_fee_points' => ['nullable', 'numeric', 'min:0', 'max:999999.99'],
+            'contract_duration_months' => [
+                'nullable', 'integer', 'min:1', 'max:120',
+                Rule::requiredIf(fn () => $this->input('employment_type') === 'PKWT' && ! $this->filled('contract_end_date')),
+            ],
+            'contract_end_date' => [
+                'nullable', 'date', 'after_or_equal:hire_date',
+                Rule::requiredIf(fn () => $this->input('employment_type') === 'PKWT' && ! $this->filled('contract_duration_months')),
+            ],
+            'probation_duration_months' => [
+                'nullable', 'integer', 'min:0', 'max:12',
+            ],
+            'pph21_enabled' => ['nullable', 'boolean'],
+            'pph21_method' => [
+                Rule::requiredIf(fn () => $this->boolean('pph21_enabled', true) && $this->input('pph21_method') !== 'none'),
+                'nullable',
+                Rule::in(['ter_bulanan', 'ter_bulanan_net', 'ter_bulanan_gross_up', 'ter_harian', 'gross', 'net', 'gross_up', 'none']),
+            ],
+            'pph21_rate' => [
+                Rule::requiredIf(fn () => $this->boolean('pph21_enabled', true) && ! in_array($this->input('pph21_method'), ['none', 'ter_bulanan', 'ter_bulanan_net', 'ter_bulanan_gross_up'], true)),
+                'nullable',
+                'integer',
+                'min:0',
+            ],
+            'ptkp_category' => ['nullable', Rule::in(['TK/0', 'TK/1', 'TK/2', 'TK/3', 'K/0', 'K/1', 'K/2', 'K/3'])],
+            'division_id' => ['required', 'integer', Rule::exists('divisions', 'id')->where('user_id', $ownerId)],
+            'sub_company_id' => [
+                $subCompanyScopeIds === null ? 'nullable' : 'required',
+                'integer',
+                Rule::exists('sub_companies', 'id')->where('user_id', $ownerId),
+                function (string $attribute, mixed $value, \Closure $fail) use ($subCompanyScopeIds): void {
+                    if ($subCompanyScopeIds === null || in_array((int) $value, $subCompanyScopeIds, true)) {
+                        return;
+                    }
+
+                    $fail('Sub-company tidak termasuk scope sub-user ini.');
+                },
+            ],
+            'attendance_location_ids' => ['nullable', 'array', 'max:20'],
+            'attendance_location_ids.*' => ['string', 'max:100'],
+            'is_wfa' => ['sometimes', 'boolean'],
+            'timezone' => ['nullable', Rule::in(array_keys(Employee::TIMEZONES))],
+            'position_id' => [
+                'required',
+                'integer',
+                Rule::exists('positions', 'id')->where('user_id', $ownerId),
+                function (string $attribute, mixed $value, \Closure $fail) use ($employee, $ownerId): void {
+                    $positionLevel = Position::query()->whereKey($value)->value('level');
+
+                    if (! in_array((string) $positionLevel, ['0', '1', '2'], true)) {
+                        return;
+                    }
+
+                    $subCompanyId = $this->input('sub_company_id');
+                    $isOccupied = Employee::withoutGlobalScope('sub_user_sub_company_records')
+                        ->where('user_id', $ownerId)
+                        ->where('position_id', $value)
+                        ->when(
+                            $subCompanyId === null || $subCompanyId === '',
+                            fn ($query) => $query->whereNull('sub_company_id'),
+                            fn ($query) => $query->where('sub_company_id', $subCompanyId),
+                        )
+                        ->whereKeyNot($employee->id)
+                        ->exists();
+
+                    if ($isOccupied) {
+                        $fail('Jabatan level 0-2 hanya boleh diisi oleh satu orang per sub-company.');
+                    }
+                },
+            ],
+            'manager_id' => [
+                'nullable',
+                'integer',
+                Rule::exists('employees', 'id')->where('user_id', $ownerId),
+                Rule::notIn([$employee->id]),
+            ],
+            'base_salary' => ['nullable', 'numeric', 'min:0'],
+            'salary_type' => ['nullable', Rule::in(['gross', 'net'])],
+            'bank_name' => ['nullable', 'string', 'max:100'],
+            'account_number' => ['nullable', 'string', 'max:50'],
+            'account_holder_name' => ['nullable', 'string', 'max:150'],
+            'fixed_allowances' => ['nullable', 'array', 'max:20'],
+            'fixed_allowances.*.name' => ['required', 'string', 'max:100'],
+            'fixed_allowances.*.amount' => ['required', 'numeric', 'min:0', 'max:'.FixedAllowanceAmount::MAX],
+            'address' => ['nullable', 'string', 'max:500'],
+            'domicile_address' => ['nullable', 'string', 'max:500'],
+            'family_card_number' => ['nullable', 'string', 'max:32'],
+            'ktp_number' => ['nullable', 'string', 'max:32'],
+            'npwp_number' => ['nullable', 'string', 'max:32'],
+            'blood_type' => ['nullable', Rule::in(['A', 'B', 'AB', 'O'])],
+            'religion' => ['nullable', 'string', 'max:50'],
+            'bpjs_kesehatan_number' => ['nullable', 'string', 'max:32'],
+            'bpjs_ketenagakerjaan_number' => ['nullable', 'string', 'max:32'],
+            'bpjs_kesehatan_enabled' => ['sometimes', 'boolean'],
+            'bpjs_ketenagakerjaan_enabled' => ['sometimes', 'boolean'],
+            'bpjs_jkk_enabled' => ['sometimes', 'boolean'],
+            'bpjs_jkm_enabled' => ['sometimes', 'boolean'],
+            'bpjs_jht_enabled' => ['sometimes', 'boolean'],
+            'bpjs_jp_enabled' => ['sometimes', 'boolean'],
+            'bpjs_kesehatan_class' => ['nullable', 'in:I,II,III'],
+            'bpjs_kesehatan_reported_wage' => ['nullable', 'numeric', 'min:0'],
+            'private_insurance_enabled' => ['sometimes', 'boolean'],
+            'private_insurance_name' => ['nullable', 'string', 'max:100'],
+            'private_insurance_nominal' => ['nullable', 'numeric', 'min:0'],
+            'sim_a_number' => ['nullable', 'string', 'max:32'],
+            'sim_b_number' => ['nullable', 'string', 'max:32'],
+            'sim_c_number' => ['nullable', 'string', 'max:32'],
+            'biological_mother_name' => ['nullable', 'string', 'max:100'],
+            'emergency_contact_name' => ['nullable', 'string', 'max:100'],
+            'emergency_contact_phone' => ['nullable', 'string', 'max:30'],
+            'emergency_contact_relationship' => ['nullable', 'string', 'max:80'],
+            'change_effective_date' => ['nullable', 'date', 'before_or_equal:today'],
+            'change_notes' => ['nullable', 'string', 'max:1000'],
+            'notes' => ['nullable', 'string', 'max:1000'],
+            'is_active' => ['sometimes', 'boolean'],
+        ];
+    }
+
+    /**
+     * Get custom validation messages.
+     *
+     * @return array<string, string>
+     */
+    public function messages(): array
+    {
+        return [
+            'sub_company_id.required' => 'Sub-company wajib dipilih untuk sub-user.',
+            'sub_company_id.exists' => 'Sub-company tidak ditemukan pada akun owner.',
+        ];
+    }
+
+    private function normalizeCurrencyInput(mixed $value): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        $normalized = preg_replace('/[^\d]/', '', (string) $value);
+
+        return $normalized === '' ? null : $normalized;
+    }
+
+    private function normalizeEmploymentType(mixed $value): string
+    {
+        return match (strtolower((string) $value)) {
+            'permanent', 'tetap' => 'PKWTT',
+            'contract', 'kontrak' => 'PKWT',
+            'internship', 'magang', 'freelance' => 'FL',
+            'daily worker', 'daily_worker', 'harian' => 'DW',
+            'outsourcing' => 'OS',
+            default => strtoupper((string) $value),
+        };
+    }
+}

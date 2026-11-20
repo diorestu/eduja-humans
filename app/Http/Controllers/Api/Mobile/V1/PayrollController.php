@@ -1,0 +1,203 @@
+<?php
+
+namespace App\Http\Controllers\Api\Mobile\V1;
+
+use App\Http\Controllers\Api\Concerns\InteractsWithMobileApiResponse;
+use App\Http\Controllers\Api\Mobile\V1\Concerns\InteractsWithSelfService;
+use App\Http\Controllers\Controller;
+use App\Http\Requests\Hris\GeneratePayrollRequest;
+use App\Models\PayrollRun;
+use App\Models\User;
+use App\Services\PayrollAdjustmentService;
+use App\Services\PayrollGenerationService;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Carbon;
+
+class PayrollController extends Controller
+{
+    use InteractsWithMobileApiResponse, InteractsWithSelfService;
+
+    public function preview(Request $request): JsonResponse
+    {
+        $user = $request->user();
+        $validated = $request->validate([
+            'period' => ['nullable', 'date_format:Y-m'],
+            'run_id' => ['nullable', 'integer'],
+        ]);
+
+        $period = $validated['period'] ?? now()->format('Y-m');
+
+        $employee = $user && $this->isSelfServiceUser($user) ? $this->resolveRequiredSelfServiceEmployee($user) : null;
+        $run = PayrollRun::query()
+            ->with('items.employee:id,employee_code,first_name,last_name')
+            ->where('user_id', $user->accountOwnerId())
+            ->where('period', $period)
+            ->when($request->integer('run_id'), fn ($q) => $q->whereKey($request->integer('run_id')))
+            ->when($employee, fn ($q) => $q->released()->whereHas('items', fn ($items) => $items->where('employee_id', $employee->id)))
+            ->latest('id')->first();
+
+        abort_if($request->filled('run_id') && ! $run, 404);
+
+        if ($user && $this->isSelfServiceUser($user)) {
+            if ($run && ! $run->isReleased() && ! $run->is_saved) {
+                $run = null;
+            }
+        }
+
+        return $this->success($this->payload($period, $run, $user));
+    }
+
+    public function generate(GeneratePayrollRequest $request, PayrollGenerationService $payrolls): JsonResponse
+    {
+        $ownerId = $request->user()->accountOwnerId();
+        $period = $request->validated('period');
+        $run = $payrolls->generateForPeriod($ownerId, $period, $request->user()?->id,
+            includeSubCompanyEmployees: ($request->validated('employee_scope') ?? 'all') === 'all',
+            excludedEmployeeIds: $request->validated('excluded_employee_ids') ?? [],
+            serviceFeeTotal: (float) ($request->validated('service_fee_total') ?? 0),
+            customPeriodStart: $request->validated('period_start'), customPeriodEnd: $request->validated('period_end'),
+            selectedEmployeeIds: $request->validated('selected_employee_ids'), batchPurpose: $request->validated('batch_purpose') ?? 'regular', runId: $request->validated('run_id'));
+
+        $run->load('items.employee:id,employee_code,first_name,last_name');
+
+        return $this->success($this->payload($period, $run, $request->user()), 'Payroll berhasil di-generate.');
+    }
+
+    public function save(PayrollRun $payrollRun, Request $request): JsonResponse
+    {
+        abort_unless((int) $payrollRun->user_id === $request->user()->accountOwnerId(), 403);
+        app(PayrollAdjustmentService::class)->release($payrollRun, $request->user()?->id, false);
+
+        $payrollRun->load('items.employee:id,employee_code,first_name,last_name');
+
+        return $this->success($this->payload($payrollRun->period, $payrollRun, $request->user()), 'Payroll berhasil disimpan.');
+    }
+
+    /**
+     * Get payroll history (slip gaji bulan-bulan sebelumnya).
+     */
+    public function history(Request $request): JsonResponse
+    {
+        /** @var User $user */
+        $user = $request->user();
+        $employee = $this->resolveRequiredSelfServiceEmployee($user);
+        $year = $request->input('year', now()->year);
+
+        // Ambil semua payroll run tahun ini yang sudah dirilis (status = released atau is_saved = true)
+        $payrolls = PayrollRun::query()
+            ->with([
+                'items' => fn ($q) => $q
+                    ->where('employee_id', $employee->id)
+                    ->select(['id', 'payroll_run_id', 'employee_id', 'base_salary', 'allowances_total', 'deductions_total', 'net_salary']),
+            ])
+            ->where('user_id', $user->accountOwnerId())
+            ->where('type', 'regular')
+            ->whereHas('items', fn ($q) => $q->where('employee_id', $employee->id))
+            ->whereYear('period_start', $year)
+            ->where(function ($q) {
+                $q->where('status', 'released')
+                    ->orWhere('is_saved', true);
+            })
+            ->orderByDesc('period')->orderByDesc('id')
+            ->get();
+
+        $items = $payrolls->map(function ($payroll) {
+            $item = $payroll->items->first();
+
+            return [
+                'id' => $payroll->id,
+                'run_id' => $payroll->id,
+                'code' => $payroll->code,
+                'batch_purpose' => $payroll->batch_purpose,
+                'period' => $payroll->period,
+                'period_label' => Carbon::createFromFormat('Y-m-d', $payroll->period.'-01')->locale('id')->translatedFormat('F Y'),
+                'period_start' => $payroll->period_start?->toDateString(),
+                'period_end' => $payroll->period_end?->toDateString(),
+                'base_salary' => (float) ($item?->base_salary ?? 0),
+                'allowances_total' => (float) ($item?->allowances_total ?? 0),
+                'deductions_total' => (float) ($item?->deductions_total ?? 0),
+                'net_salary' => (float) ($item?->net_salary ?? 0),
+                'generated_at' => $payroll->generated_at?->toDateTimeString(),
+                'can_export' => true,
+            ];
+        })->values();
+
+        return $this->success([
+            'year' => $year,
+            'items' => $items,
+        ], 'Payroll history retrieved successfully.');
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function payload(string $period, ?PayrollRun $run, ?User $user = null): array
+    {
+        $items = $run?->items ?? collect();
+
+        if ($run && $user && $this->isSelfServiceUser($user)) {
+            $employee = $this->resolveRequiredSelfServiceEmployee($user);
+            $items = $items->where('employee_id', $employee->id)->values();
+        }
+
+        return [
+            'period' => $period,
+            'batches' => $user ? PayrollRun::query()->where('user_id', $user->accountOwnerId())->where('period', $period)->when($this->isSelfServiceUser($user), fn ($q) => $q->released()->whereHas('items', fn ($i) => $i->where('employee_id', $this->resolveRequiredSelfServiceEmployee($user)->id)))->latest('id')->get(['id', 'code', 'batch_purpose', 'status']) : [],
+            'run' => $run ? [
+                'id' => $run->id,
+                'code' => $run->code,
+                'batch_purpose' => $run->batch_purpose,
+                'period' => $run->period,
+                'period_start' => $run->period_start?->format('Y-m-d'),
+                'period_end' => $run->period_end?->format('Y-m-d'),
+                'generated_at' => $run->generated_at?->toDateTimeString(),
+                'generated_by' => $run->generated_by,
+                'is_saved' => $run->is_saved,
+                'saved_at' => $run->saved_at?->toDateTimeString(),
+                'saved_by' => $run->saved_by,
+                'employees_count' => $run->employees_count,
+                'total_base_salary' => $run->total_base_salary,
+                'total_allowances' => $run->total_allowances,
+                'total_deductions' => $run->total_deductions,
+                'total_net_salary' => $run->total_net_salary,
+            ] : null,
+            'items' => $run
+                ? $items->map(fn ($item) => [
+                    'id' => $item->id,
+                    'employee_id' => $item->employee_id,
+                    'employee_label' => $item->employee
+                        ? $item->employee->employee_code.' - '.$item->employee->full_name
+                        : '-',
+                    'base_salary' => $item->base_salary,
+                    'allowances_total' => $item->allowances_total,
+                    'pph21_method' => $item->pph21_method,
+                    'pph21_rate' => $item->pph21_rate,
+                    'pph21_allowance' => $item->pph21_allowance,
+                    'pph21_deduction' => $item->pph21_deduction,
+                    'pph21_company_borne' => $item->pph21_company_borne,
+                    'bpjs_kesehatan_company' => $item->bpjs_kesehatan_company,
+                    'bpjs_kesehatan_employee' => $item->bpjs_kesehatan_employee,
+                    'bpjs_jkk_company' => $item->bpjs_jkk_company,
+                    'bpjs_jkm_company' => $item->bpjs_jkm_company,
+                    'bpjs_jht_company' => $item->bpjs_jht_company,
+                    'bpjs_jht_employee' => $item->bpjs_jht_employee,
+                    'bpjs_jp_company' => $item->bpjs_jp_company,
+                    'bpjs_jp_employee' => $item->bpjs_jp_employee,
+                    'bpjs_total_company' => $item->bpjs_total_company,
+                    'bpjs_total_employee' => $item->bpjs_total_employee,
+                    'kasbon_deduction' => $item->kasbon_deduction,
+                    'denda_deduction' => $item->denda_deduction,
+                    'unpaid_leave_deduction' => $item->unpaid_leave_deduction,
+                    'manual_deduction_total' => (float) ($item->manual_deduction_total ?? 0),
+                    'manual_deduction_breakdown' => $item->manual_deduction_breakdown ?? [],
+                    'deductions_total' => $item->deductions_total,
+                    'net_salary' => $item->net_salary,
+                    'allowance_breakdown' => $item->allowance_breakdown ?? [],
+                    'variable_allowance_breakdown' => $item->variable_allowance_breakdown ?? [],
+                    'bonus_breakdown' => $item->bonus_breakdown ?? [],
+                ])->values()
+                : [],
+        ];
+    }
+}

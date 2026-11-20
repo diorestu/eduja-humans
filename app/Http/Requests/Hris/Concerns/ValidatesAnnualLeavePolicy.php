@@ -1,0 +1,54 @@
+<?php
+
+namespace App\Http\Requests\Hris\Concerns;
+
+use App\Models\Employee;
+use App\Models\User;
+use App\Services\LeaveBalanceService;
+use Illuminate\Support\Carbon;
+use Illuminate\Validation\Validator;
+
+trait ValidatesAnnualLeavePolicy
+{
+    public function withValidator(Validator $validator): void
+    {
+        $validator->after(function (Validator $validator): void {
+            if ($validator->errors()->isNotEmpty() || $this->input('leave_type') !== 'annual') {
+                return;
+            }
+
+            $owner = User::find($this->user()->accountOwnerId());
+            $employeeId = $this->integer('employee_id');
+
+            if (! $employeeId && method_exists($this->user(), 'employee') && $this->user()->employee) {
+                $employeeId = (int) $this->user()->employee->id;
+            }
+
+            $employee = Employee::withoutGlobalScopes()
+                ->where('user_id', $owner?->id)
+                ->find($employeeId);
+
+            if (! $owner || ! $employee) {
+                return;
+            }
+
+            $service = app(LeaveBalanceService::class);
+            $policy = $service->getPolicy($owner, 'annual');
+
+            if (! $policy) {
+                return;
+            }
+
+            $startDate = Carbon::parse($this->input('start_date'));
+            $totalDays = (float) $startDate->diffInDays(Carbon::parse($this->input('end_date'))) + 1;
+            $isAdminRequest = $this->routeIs('hris.*') || ! $this->routeIs('portal.*');
+            $enforceNoticePeriod = ! $isAdminRequest;
+            $message = $service->requestEligibilityError($employee, $policy, $startDate, $totalDays, null, $enforceNoticePeriod);
+
+            if ($message) {
+                $validator->errors()->add('start_date', $message);
+                $validator->errors()->add('total_days', $message);
+            }
+        });
+    }
+}

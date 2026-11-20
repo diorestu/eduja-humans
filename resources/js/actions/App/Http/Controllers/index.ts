@@ -1,0 +1,31 @@
+import Api from './Api'
+import Hris from './Hris'
+import DocsManualController from './DocsManualController'
+import NewsController from './NewsController'
+import CareerController from './CareerController'
+import Auth from './Auth'
+import BillingController from './BillingController'
+import DashboardController from './DashboardController'
+import Admin from './Admin'
+import Client from './Client'
+import UserPortalController from './UserPortalController'
+import UserPortalSectionController from './UserPortalSectionController'
+import Settings from './Settings'
+
+const Controllers = {
+    Api: Object.assign(Api, Api),
+    Hris: Object.assign(Hris, Hris),
+    DocsManualController: Object.assign(DocsManualController, DocsManualController),
+    NewsController: Object.assign(NewsController, NewsController),
+    CareerController: Object.assign(CareerController, CareerController),
+    Auth: Object.assign(Auth, Auth),
+    BillingController: Object.assign(BillingController, BillingController),
+    DashboardController: Object.assign(DashboardController, DashboardController),
+    Admin: Object.assign(Admin, Admin),
+    Client: Object.assign(Client, Client),
+    UserPortalController: Object.assign(UserPortalController, UserPortalController),
+    UserPortalSectionController: Object.assign(UserPortalSectionController, UserPortalSectionController),
+    Settings: Object.assign(Settings, Settings),
+}
+
+export default Controllers

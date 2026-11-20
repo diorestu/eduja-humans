@@ -1,0 +1,139 @@
+<?php
+
+namespace App\Models;
+
+use App\Models\Concerns\BelongsToAccount;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+
+class PayrollRun extends Model
+{
+    /** @use HasFactory<\Database\Factories\PayrollRunFactory> */
+    use BelongsToAccount, HasFactory;
+
+    /**
+     * The attributes that are mass assignable.
+     *
+     * @var list<string>
+     */
+    protected $fillable = [
+        'user_id',
+        'period',
+        'code',
+        'batch_purpose',
+        'selected_employee_ids',
+        'type',
+        'thr_reference_date',
+        'period_start',
+        'period_end',
+        'employees_count',
+        'total_base_salary',
+        'total_allowances',
+        'total_deductions',
+        'total_net_salary',
+        'service_fee_total',
+        'generated_at',
+        'generated_by',
+        'is_saved',
+        'saved_at',
+        'saved_by',
+        'status',
+        'released_at',
+        'released_by',
+        'is_locked',
+        'locked_at',
+        'locked_by',
+    ];
+
+    /**
+     * Get the attributes that should be cast.
+     *
+     * @return array<string, string>
+     */
+    protected function casts(): array
+    {
+        return [
+            'selected_employee_ids' => 'array',
+            'period_start' => 'date',
+            'period_end' => 'date',
+            'thr_reference_date' => 'date',
+            'generated_at' => 'datetime',
+            'is_saved' => 'boolean',
+            'saved_at' => 'datetime',
+            'released_at' => 'datetime',
+            'is_locked' => 'boolean',
+            'locked_at' => 'datetime',
+            'total_base_salary' => 'decimal:2',
+            'total_allowances' => 'decimal:2',
+            'total_deductions' => 'decimal:2',
+            'total_net_salary' => 'decimal:2',
+            'service_fee_total' => 'decimal:2',
+        ];
+    }
+
+    protected static function booted(): void
+    {
+        static::created(function (self $run): void {
+            if (! $run->code) {
+                $run->forceFill(['code' => ($run->type === 'thr' ? 'THR' : 'PAY').'-'.str_replace('-', '', $run->period).'-'.str_pad($run->id, 6, '0', STR_PAD_LEFT)])->saveQuietly();
+            }
+        });
+    }
+
+    public function scopeReleased($query)
+    {
+        return $query->where(fn ($q) => $q->where('status', 'released')->orWhere('is_saved', true));
+    }
+
+    /**
+     * Get payroll items in this run.
+     */
+    public function items(): HasMany
+    {
+        return $this->hasMany(PayrollItem::class);
+    }
+
+    /**
+     * Get user who generated this payroll.
+     */
+    public function generatedBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'generated_by');
+    }
+
+    /**
+     * Get user who saved/finalized this payroll.
+     */
+    public function savedBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'saved_by');
+    }
+
+    /**
+     * Get user who released this payroll.
+     */
+    public function releasedBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'released_by');
+    }
+
+    /**
+     * Get user who locked this payroll.
+     */
+    public function lockedBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'locked_by');
+    }
+
+    public function isDraft(): bool
+    {
+        return ($this->status ?? 'draft') === 'draft';
+    }
+
+    public function isReleased(): bool
+    {
+        return ($this->status ?? 'draft') === 'released';
+    }
+}

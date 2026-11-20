@@ -1,0 +1,1133 @@
+import { CalendarClock, Check, Plus, Sparkles, Tag, Trash2, Users } from 'lucide-react';
+import { Head, useForm } from '@inertiajs/react';
+import Heading from '@/components/heading';
+import InputError from '@/components/input-error';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import AppLayout from '@/layouts/app-layout';
+import SettingsLayout from '@/layouts/settings/layout';
+import {
+    formatThousandDigits,
+    normalizeDigitInput,
+} from '@/lib/currency-input';
+import { edit } from '@/routes/profile';
+import type { BreadcrumbItem } from '@/types';
+
+export type OvertimeEventItem = {
+    code?: string;
+    name: string;
+    nominal: number;
+    unit?: 'kegiatan' | 'hari' | 'jam' | 'kehadiran';
+    position_ids?: number[];
+};
+
+type PositionOption = {
+    id: number;
+    code: string;
+    name: string;
+};
+
+type Settings = {
+    active_working_days: number;
+    working_days_type?: 'fixed' | '5_days' | '6_days' | 'shift_count';
+    payroll_cutoff_day?: string;
+    payroll_period_start_day?: string | null;
+    auto_deduct_leave_for_missing_checkout: boolean;
+    overtime_calculation_mode: 'hourly' | 'threshold_daily';
+    overtime_rate_type: 'formula' | 'fixed';
+    overtime_fixed_rate_per_hour: number | null;
+    overtime_threshold_hours: number;
+    overtime_hour_divisor: number;
+    overtime_multiplier_hour1: number;
+    overtime_multiplier_subsequent: number;
+    overtime_events: OvertimeEventItem[];
+    auto_overtime_from_attendance: boolean;
+    auto_overtime_min_minutes: number;
+    bpjs_kesehatan_enabled: boolean;
+    bpjs_ketenagakerjaan_enabled: boolean;
+    bpjs_jkk_enabled: boolean;
+    bpjs_jkm_enabled: boolean;
+    bpjs_jht_enabled: boolean;
+    bpjs_jp_enabled: boolean;
+    bpjs_kesehatan_default_class: 'I' | 'II' | 'III';
+    private_insurance_enabled: boolean;
+    private_insurance_name: string;
+    private_insurance_nominal: number;
+    bpjs_kesehatan_wage_cap: number;
+    bpjs_jp_wage_cap: number;
+    bpjs_jkk_rate: number;
+};
+
+const breadcrumbs: BreadcrumbItem[] = [
+    { title: 'Profil', href: edit() },
+    { title: 'Pengaturan Payroll & Lembur', href: '/settings/payroll' },
+];
+
+export default function PayrollSettings({
+    settings,
+    positions = [],
+}: {
+    settings: Settings;
+    positions?: PositionOption[];
+}) {
+    const form = useForm({
+        ...settings,
+        working_days_type: settings.working_days_type ?? 'fixed',
+        payroll_cutoff_day: settings.payroll_cutoff_day ?? 'end_of_month',
+        payroll_period_start_day: settings.payroll_period_start_day ?? '',
+        overtime_events: (settings.overtime_events ?? []).map((e) => ({
+            code: e.code ?? '',
+            name: e.name ?? '',
+            nominal: Number(e.nominal ?? 0),
+            unit: e.unit ?? 'kegiatan',
+            position_ids: e.position_ids ?? [],
+        })),
+        overtime_fixed_rate_per_hour:
+            settings.overtime_fixed_rate_per_hour ?? '',
+        auto_deduct_leave_for_missing_checkout:
+            settings.auto_deduct_leave_for_missing_checkout,
+        auto_overtime_from_attendance: settings.auto_overtime_from_attendance,
+        auto_overtime_min_minutes: settings.auto_overtime_min_minutes ?? 30,
+    });
+
+    return (
+        <AppLayout breadcrumbs={breadcrumbs}>
+            <Head title="Pengaturan Payroll & Lembur" />
+            <SettingsLayout>
+                <div className="space-y-6">
+                    <Heading
+                        variant="small"
+                        title="Pengaturan Payroll & Lembur"
+                        description="Atur hari kerja, potongan cuti tanpa gaji, dan perhitungan upah lembur."
+                    />
+
+                    <form
+                        className="space-y-5"
+                        onSubmit={(event) => {
+                            event.preventDefault();
+                            form.patch('/settings/payroll', {
+                                preserveScroll: true,
+                            });
+                        }}
+                    >
+                        <div className="rounded-xl border bg-card p-5 shadow-sm space-y-4">
+                            <div className="flex items-center gap-2 pb-2 border-b">
+                                <CalendarClock className="h-5 w-5 text-primary" />
+                                <div>
+                                    <h3 className="font-semibold text-base">Periode Payroll & Cut-off Bulanan</h3>
+                                    <p className="text-xs text-muted-foreground">
+                                        Tentukan tanggal batas cut-off untuk akumulasi absensi, denda, dan lembur saat generate payroll bulanan.
+                                    </p>
+                                </div>
+                            </div>
+
+                            <div className="grid gap-5 grid-cols-1 md:grid-cols-2">
+                                <div className="space-y-2 min-w-0 w-full">
+                                    <Label htmlFor="payroll_cutoff_day">
+                                        Tanggal Cut-off Payroll
+                                    </Label>
+                                    <select
+                                        id="payroll_cutoff_day"
+                                        className="h-9 w-full min-w-0 max-w-full rounded-md border border-input bg-background px-3 text-sm focus:ring-1 focus:ring-primary truncate"
+                                        value={form.data.payroll_cutoff_day}
+                                        onChange={(event) =>
+                                            form.setData(
+                                                'payroll_cutoff_day',
+                                                event.target.value,
+                                            )
+                                        }
+                                    >
+                                        <option value="end_of_month">
+                                            Akhir Bulan (Tgl 1 s/d Akhir Bulan)
+                                        </option>
+                                        {Array.from({ length: 28 }, (_, index) => {
+                                            const day = index + 1;
+                                            const startDay = day + 1;
+                                            return (
+                                                <option
+                                                    key={day}
+                                                    value={String(day)}
+                                                >
+                                                    Tanggal {day} (Siklus: Tgl {startDay} - {day})
+                                                </option>
+                                            );
+                                        })}
+                                    </select>
+                                    <p className="text-xs text-muted-foreground">
+                                        {form.data.payroll_cutoff_day === 'end_of_month'
+                                            ? 'Periode payroll dihitung penuh dari tanggal 1 s/d akhir bulan bersangkutan.'
+                                            : `Periode payroll dihitung dari tanggal ${Number(form.data.payroll_cutoff_day) + 1} bulan sebelumnya s/d tanggal ${form.data.payroll_cutoff_day} bulan berjalan.`}
+                                    </p>
+                                    <InputError
+                                        message={form.errors.payroll_cutoff_day}
+                                    />
+                                </div>
+
+                                <div className="space-y-2 min-w-0 w-full">
+                                    <Label htmlFor="working_days_type">
+                                        Metode Hari Kerja Aktif
+                                    </Label>
+                                    <select
+                                        id="working_days_type"
+                                        className="h-9 w-full min-w-0 max-w-full rounded-md border border-input bg-background px-3 text-sm focus:ring-1 focus:ring-primary truncate"
+                                        value={form.data.working_days_type}
+                                        onChange={(event) =>
+                                            form.setData(
+                                                'working_days_type',
+                                                event.target.value as 'fixed' | '5_days' | '6_days' | 'shift_count',
+                                            )
+                                        }
+                                    >
+                                        <option value="fixed">
+                                            Tetap / Manual (Sesuai Angka Hari Kerja)
+                                        </option>
+                                        <option value="5_days">
+                                            5 Hari Kerja (Senin - Jumat Dinamis)
+                                        </option>
+                                        <option value="6_days">
+                                            6 Hari Kerja (Senin - Sabtu Dinamis)
+                                        </option>
+                                        <option value="shift_count">
+                                            Jumlah Shift (Sesuai Jadwal Shift Karyawan)
+                                        </option>
+                                    </select>
+                                    <p className="text-xs text-muted-foreground">
+                                        {form.data.working_days_type === '5_days'
+                                            ? 'Dihitung otomatis mengikuti jumlah hari Senin s/d Jumat pada periode payroll berjalan.'
+                                            : form.data.working_days_type === '6_days'
+                                              ? 'Dihitung otomatis mengikuti jumlah hari Senin s/d Sabtu pada periode payroll berjalan.'
+                                              : form.data.working_days_type === 'shift_count'
+                                                ? 'Dihitung dinamis dari total shift aktif terjadwal masing-masing karyawan pada periode payroll.'
+                                                : 'Menggunakan nilai angka hari kerja aktif tetap di bawah sebagai pembagi.'}
+                                    </p>
+                                    <InputError
+                                        message={form.errors.working_days_type}
+                                    />
+                                </div>
+
+                                <div className="space-y-2 min-w-0 w-full">
+                                    <Label htmlFor="active_working_days">
+                                        {form.data.working_days_type === 'fixed'
+                                            ? 'Hari Kerja Aktif Standar'
+                                            : 'Hari Kerja Cadangan (Fallback)'}
+                                    </Label>
+                                    <div className="relative">
+                                        <Input
+                                            id="active_working_days"
+                                            type="number"
+                                            min="1"
+                                            max="31"
+                                            className="w-full pr-14"
+                                            value={form.data.active_working_days}
+                                            onChange={(event) =>
+                                                form.setData(
+                                                    'active_working_days',
+                                                    Number(event.target.value),
+                                                )
+                                            }
+                                        />
+                                        <span className="pointer-events-none absolute right-3 top-2.5 text-xs text-muted-foreground font-medium">
+                                            hari
+                                        </span>
+                                    </div>
+                                    <p className="text-xs text-muted-foreground">
+                                        {form.data.working_days_type === 'fixed'
+                                            ? 'Default 22 hari. Digunakan sebagai pembagi perhitungan denda prorata dan potongan cuti tanpa gaji.'
+                                            : 'Digunakan sebagai nilai cadangan apabila jadwal shift belum dibuat atau bernilai 0.'}
+                                    </p>
+                                    <InputError
+                                        message={form.errors.active_working_days}
+                                    />
+                                </div>
+
+                                <div className="col-span-1 md:col-span-2 rounded-lg border bg-blue-50/60 dark:bg-blue-950/20 border-blue-200 dark:border-blue-900/50 p-3.5 text-xs text-blue-900 dark:text-blue-200">
+                                    <p className="font-semibold mb-1">Dampak Pengaturan Cut-off terhadap Generate Payroll:</p>
+                                    <p className="leading-relaxed">
+                                        {form.data.payroll_cutoff_day === 'end_of_month'
+                                            ? 'Saat generate payroll untuk periode tertentu (misal September 2026), seluruh rekapan absensi, denda keterlambatan akumulatif, lembur, dan potongan otomatis dihitung untuk rentang 01 September s/d 30 September.'
+                                            : `Saat generate payroll untuk periode tertentu (misal September 2026), seluruh rekapan absensi, denda keterlambatan akumulatif, lembur, dan potongan otomatis dihitung untuk rentang ${Number(form.data.payroll_cutoff_day) + 1} bulan sebelumnya s/d ${form.data.payroll_cutoff_day} bulan berjalan.`}
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="grid gap-5 grid-cols-1 md:grid-cols-2">
+                            <div className="space-y-2 min-w-0 w-full">
+                                <Label htmlFor="overtime_calculation_mode">
+                                    Metode Hitung Lembur
+                                </Label>
+                                <select
+                                    id="overtime_calculation_mode"
+                                    className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                                    value={form.data.overtime_calculation_mode}
+                                    onChange={(event) =>
+                                        form.setData(
+                                            'overtime_calculation_mode',
+                                            event.target
+                                                .value as Settings['overtime_calculation_mode'],
+                                        )
+                                    }
+                                >
+                                    <option value="hourly">Per jam</option>
+                                    <option value="threshold_daily">
+                                        Per ambang jam
+                                    </option>
+                                </select>
+                                <p className="text-xs text-muted-foreground">
+                                    Mode ambang menghitung setiap ambang yang
+                                    terpenuhi sebagai 8 jam / 1 hari.
+                                </p>
+                                <InputError
+                                    message={
+                                        form.errors.overtime_calculation_mode
+                                    }
+                                />
+                            </div>
+                            <div className="space-y-2 min-w-0 w-full">
+                                <Label htmlFor="overtime_threshold_hours">
+                                    Ambang Jam
+                                </Label>
+                                <Input
+                                    id="overtime_threshold_hours"
+                                    type="number"
+                                    min="1"
+                                    max="24"
+                                    className="w-full"
+                                    value={form.data.overtime_threshold_hours}
+                                    onChange={(event) =>
+                                        form.setData(
+                                            'overtime_threshold_hours',
+                                            Number(event.target.value),
+                                        )
+                                    }
+                                />
+                                <p className="text-xs text-muted-foreground">
+                                    Contoh: 10 jam dapat dihitung sebagai 8 jam
+                                    / 1 hari.
+                                </p>
+                                <InputError
+                                    message={
+                                        form.errors.overtime_threshold_hours
+                                    }
+                                />
+                            </div>
+                            <div className="space-y-2 min-w-0 w-full">
+                                <Label htmlFor="overtime_rate_type">
+                                    Skema Tarif Lembur
+                                </Label>
+                                <select
+                                    id="overtime_rate_type"
+                                    className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                                    value={form.data.overtime_rate_type}
+                                    onChange={(event) =>
+                                        form.setData(
+                                            'overtime_rate_type',
+                                            event.target
+                                                .value as Settings['overtime_rate_type'],
+                                        )
+                                    }
+                                >
+                                    <option value="formula">
+                                        Formula Gaji Pokok (Depnaker / Standar)
+                                    </option>
+                                    <option value="fixed">
+                                        Nominal Flat per Jam (Fixed Rate)
+                                    </option>
+                                </select>
+                                <p className="text-xs text-muted-foreground">
+                                    Pilih apakah upah lembur per jam dihitung
+                                    dari gaji pokok atau nominal tetap.
+                                </p>
+                                <InputError
+                                    message={form.errors.overtime_rate_type}
+                                />
+                            </div>
+
+                            {form.data.overtime_rate_type === 'fixed' ? (
+                                <div className="grid gap-2">
+                                    <Label htmlFor="overtime_fixed_rate_per_hour">
+                                        Nominal Lembur per Jam (Rp)
+                                    </Label>
+                                    <Input
+                                        id="overtime_fixed_rate_per_hour"
+                                        type="number"
+                                        min="0"
+                                        placeholder="Contoh: 20000"
+                                        value={
+                                            form.data
+                                                .overtime_fixed_rate_per_hour ??
+                                            ''
+                                        }
+                                        onChange={(event) =>
+                                            form.setData(
+                                                'overtime_fixed_rate_per_hour',
+                                                event.target.value === ''
+                                                    ? ''
+                                                    : Number(
+                                                          event.target.value,
+                                                      ),
+                                            )
+                                        }
+                                    />
+                                    <p className="text-xs text-muted-foreground">
+                                        Nominal tetap per jam yang dibayarkan ke
+                                        karyawan tanpa menghitung gaji pokok.
+                                    </p>
+                                    <InputError
+                                        message={
+                                            form.errors
+                                                .overtime_fixed_rate_per_hour
+                                        }
+                                    />
+                                </div>
+                            ) : (
+                                <>
+                                    <div className="grid gap-2">
+                                        <Label htmlFor="overtime_hour_divisor">
+                                            Pembagi Jam
+                                        </Label>
+                                        <Input
+                                            id="overtime_hour_divisor"
+                                            type="number"
+                                            min="1"
+                                            value={
+                                                form.data.overtime_hour_divisor
+                                            }
+                                            onChange={(event) =>
+                                                form.setData(
+                                                    'overtime_hour_divisor',
+                                                    Number(event.target.value),
+                                                )
+                                            }
+                                        />
+                                        <p className="text-xs text-muted-foreground">
+                                            Gaji per jam = gaji pokok dibagi
+                                            divisor. Standar: 173 jam/bulan.
+                                        </p>
+                                        <InputError
+                                            message={
+                                                form.errors
+                                                    .overtime_hour_divisor
+                                            }
+                                        />
+                                    </div>
+                                    <div className="grid gap-2">
+                                        <Label htmlFor="overtime_multiplier_hour1">
+                                            Multiplier Jam Pertama
+                                        </Label>
+                                        <Input
+                                            id="overtime_multiplier_hour1"
+                                            type="number"
+                                            step="0.1"
+                                            min="1"
+                                            value={
+                                                form.data
+                                                    .overtime_multiplier_hour1
+                                            }
+                                            onChange={(event) =>
+                                                form.setData(
+                                                    'overtime_multiplier_hour1',
+                                                    Number(event.target.value),
+                                                )
+                                            }
+                                        />
+                                        <InputError
+                                            message={
+                                                form.errors
+                                                    .overtime_multiplier_hour1
+                                            }
+                                        />
+                                    </div>
+                                    <div className="grid gap-2">
+                                        <Label htmlFor="overtime_multiplier_subsequent">
+                                            Multiplier Jam Selanjutnya
+                                        </Label>
+                                        <Input
+                                            id="overtime_multiplier_subsequent"
+                                            type="number"
+                                            step="0.1"
+                                            min="1"
+                                            value={
+                                                form.data
+                                                    .overtime_multiplier_subsequent
+                                            }
+                                            onChange={(event) =>
+                                                form.setData(
+                                                    'overtime_multiplier_subsequent',
+                                                    Number(event.target.value),
+                                                )
+                                            }
+                                        />
+                                        <InputError
+                                            message={
+                                                form.errors
+                                                    .overtime_multiplier_subsequent
+                                            }
+                                        />
+                                    </div>
+                                </>
+                            )}
+                        </div>
+
+                        <div className="space-y-4 rounded-xl border border-slate-200/90 bg-white p-5 shadow-xs">
+                            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between border-b border-slate-100 pb-4">
+                                <div className="space-y-0.5">
+                                    <div className="flex items-center gap-2">
+                                        <div className="flex size-7 items-center justify-center rounded-lg bg-indigo-50 text-indigo-600">
+                                            <CalendarClock className="size-4" />
+                                        </div>
+                                        <h3 className="text-sm font-semibold text-slate-900">
+                                            Event Lembur & Insentif per Jabatan
+                                        </h3>
+                                    </div>
+                                    <p className="text-xs text-slate-500 pl-9">
+                                        Kustomisasi jenis lembur/kegiatan khusus, tarif insentif, dan pembatasan jabatan karyawan yang berhak mengajukan.
+                                    </p>
+                                </div>
+                                <Button
+                                    type="button"
+                                    size="sm"
+                                    onClick={() =>
+                                        form.setData('overtime_events', [
+                                            ...form.data.overtime_events,
+                                            { code: '', name: '', nominal: 0, unit: 'kegiatan', position_ids: [] },
+                                        ])
+                                    }
+                                    className="gap-1.5 text-xs font-medium self-start sm:self-auto"
+                                >
+                                    <Plus className="size-3.5" />
+                                    Tambah Event Baru
+                                </Button>
+                            </div>
+
+                            {form.data.overtime_events.length === 0 ? (
+                                <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-slate-200 bg-slate-50/60 px-4 py-8 text-center">
+                                    <div className="flex size-10 items-center justify-center rounded-full bg-slate-100 text-slate-400">
+                                        <Sparkles className="size-5" />
+                                    </div>
+                                    <p className="mt-2 text-xs font-medium text-slate-700">
+                                        Belum Ada Komponen Event Khusus
+                                    </p>
+                                    <p className="mt-0.5 max-w-sm text-[11px] text-slate-500">
+                                        Jika perusahaan memiliki insentif lembur event khusus (seperti event toko, stock opname, dinas luar), tambahkan di sini.
+                                    </p>
+                                    <Button
+                                        type="button"
+                                        variant="outline"
+                                        size="sm"
+                                        onClick={() =>
+                                            form.setData('overtime_events', [
+                                                { code: '', name: '', nominal: 0, unit: 'kegiatan', position_ids: [] },
+                                            ])
+                                        }
+                                        className="mt-3.5 h-8 gap-1.5 text-xs"
+                                    >
+                                        <Plus className="size-3.5" />
+                                        Buat Event Pertama
+                                    </Button>
+                                </div>
+                            ) : (
+                                <div className="space-y-4">
+                                    {form.data.overtime_events.map((event, index) => {
+                                        const selectedCount = (event.position_ids ?? []).length;
+                                        const isAllPositions = selectedCount === 0;
+
+                                        return (
+                                            <div
+                                                key={index}
+                                                className="group relative rounded-xl border border-slate-200/80 bg-slate-50/40 p-4 transition-all hover:border-slate-300 hover:bg-slate-50/70 hover:shadow-xs space-y-3.5"
+                                            >
+                                                {/* Header Card Event */}
+                                                <div className="flex items-center justify-between">
+                                                    <div className="flex items-center gap-2">
+                                                        <span className="flex size-5 items-center justify-center rounded-full bg-slate-200 text-[10px] font-bold text-slate-700">
+                                                            {index + 1}
+                                                        </span>
+                                                        <span className="text-xs font-medium text-slate-800">
+                                                            {event.name ? event.name : 'Event Baru (Belum diberi nama)'}
+                                                        </span>
+                                                        {event.code && (
+                                                            <span className="rounded bg-slate-200/70 px-1.5 py-0.5 font-mono text-[10px] text-slate-600">
+                                                                {event.code}
+                                                            </span>
+                                                        )}
+                                                    </div>
+
+                                                    <Button
+                                                        type="button"
+                                                        variant="ghost"
+                                                        size="sm"
+                                                        onClick={() => {
+                                                            const newEvents = [...form.data.overtime_events];
+                                                            newEvents.splice(index, 1);
+                                                            form.setData('overtime_events', newEvents);
+                                                        }}
+                                                        className="h-7 text-xs text-rose-500 hover:bg-rose-50 hover:text-rose-600 gap-1 px-2"
+                                                    >
+                                                        <Trash2 className="size-3.5" />
+                                                        Hapus
+                                                    </Button>
+                                                </div>
+
+                                                {/* Grid Input Utama */}
+                                                <div className="grid gap-3 grid-cols-1 md:grid-cols-12">
+                                                    <div className="md:col-span-3 space-y-1">
+                                                        <Label className="text-[11px] font-medium text-slate-600 flex items-center gap-1">
+                                                            <Tag className="size-3 text-slate-400" />
+                                                            Kode (Opsional)
+                                                        </Label>
+                                                        <Input
+                                                            placeholder="Misal: OT_EVENT"
+                                                            value={event.code ?? ''}
+                                                            className="h-9 bg-white text-xs font-mono"
+                                                            onChange={(e) => {
+                                                                const newEvents = [...form.data.overtime_events];
+                                                                newEvents[index].code = e.target.value.toUpperCase();
+                                                                form.setData('overtime_events', newEvents);
+                                                            }}
+                                                        />
+                                                    </div>
+
+                                                    <div className="md:col-span-4 space-y-1">
+                                                        <Label className="text-[11px] font-medium text-slate-600">
+                                                            Nama Event / Kegiatan <span className="text-rose-500">*</span>
+                                                        </Label>
+                                                        <Input
+                                                            placeholder="Misal: OT Event Toko / Bazaar"
+                                                            value={event.name}
+                                                            className="h-9 bg-white text-xs"
+                                                            required
+                                                            onChange={(e) => {
+                                                                const newEvents = [...form.data.overtime_events];
+                                                                newEvents[index].name = e.target.value;
+                                                                form.setData('overtime_events', newEvents);
+                                                            }}
+                                                        />
+                                                        <InputError
+                                                            message={
+                                                                (form.errors as Record<string, string>)[
+                                                                    `overtime_events.${index}.name`
+                                                                ]
+                                                            }
+                                                        />
+                                                    </div>
+
+                                                    <div className="md:col-span-3 space-y-1">
+                                                        <Label className="text-[11px] font-medium text-slate-600">
+                                                            Tarif Insentif <span className="text-rose-500">*</span>
+                                                        </Label>
+                                                        <div className="relative">
+                                                            <span className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-2.5 text-xs text-slate-400">
+                                                                Rp
+                                                            </span>
+                                                            <Input
+                                                                type="text"
+                                                                inputMode="numeric"
+                                                                placeholder="0"
+                                                                value={event.nominal ? formatThousandDigits(event.nominal) : ''}
+                                                                className="h-9 bg-white pl-8 text-xs font-medium"
+                                                                required
+                                                                onChange={(e) => {
+                                                                    const raw = normalizeDigitInput(e.target.value);
+                                                                    const newEvents = [...form.data.overtime_events];
+                                                                    newEvents[index].nominal = raw ? Number(raw) : 0;
+                                                                    form.setData('overtime_events', newEvents);
+                                                                }}
+                                                            />
+                                                        </div>
+                                                        <InputError
+                                                            message={
+                                                                (form.errors as Record<string, string>)[
+                                                                    `overtime_events.${index}.nominal`
+                                                                ]
+                                                            }
+                                                        />
+                                                    </div>
+
+                                                    <div className="md:col-span-2 space-y-1">
+                                                        <Label className="text-[11px] font-medium text-slate-600">
+                                                            Hitungan Per
+                                                        </Label>
+                                                        <select
+                                                            className="h-9 w-full rounded-md border border-input bg-white px-2.5 text-xs outline-none focus:border-primary"
+                                                            value={event.unit ?? 'kegiatan'}
+                                                            onChange={(e) => {
+                                                                const newEvents = [...form.data.overtime_events];
+                                                                newEvents[index].unit = e.target.value as 'kegiatan' | 'hari' | 'jam' | 'kehadiran';
+                                                                form.setData('overtime_events', newEvents);
+                                                            }}
+                                                        >
+                                                            <option value="kegiatan">Kegiatan</option>
+                                                            <option value="jam">Jam</option>
+                                                            <option value="hari">Hari</option>
+                                                            <option value="kehadiran">Kehadiran</option>
+                                                        </select>
+                                                    </div>
+                                                </div>
+
+                                                {/* Batasan Jabatan */}
+                                                <div className="rounded-lg border border-slate-200/60 bg-white p-3 space-y-2">
+                                                    <div className="flex flex-wrap items-center justify-between gap-1.5">
+                                                        <div className="flex items-center gap-1.5">
+                                                            <Users className="size-3.5 text-slate-400" />
+                                                            <span className="text-[11px] font-medium text-slate-700">
+                                                                Hak Akses Jabatan:
+                                                            </span>
+                                                            <span className="text-[11px] text-slate-500">
+                                                                {isAllPositions ? (
+                                                                    <Badge variant="secondary" className="font-normal text-[10px] py-0 px-1.5">
+                                                                        Semua Jabatan Bisa Mengajukan
+                                                                    </Badge>
+                                                                ) : (
+                                                                    <Badge variant="outline" className="font-medium text-[10px] text-indigo-700 border-indigo-200 bg-indigo-50/50 py-0 px-1.5">
+                                                                        Terbatas ({selectedCount} jabatan)
+                                                                    </Badge>
+                                                                )}
+                                                            </span>
+                                                        </div>
+
+                                                        {!isAllPositions && (
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => {
+                                                                    const newEvents = [...form.data.overtime_events];
+                                                                    newEvents[index].position_ids = [];
+                                                                    form.setData('overtime_events', newEvents);
+                                                                }}
+                                                                className="text-[10px] text-slate-500 hover:text-indigo-600 underline cursor-pointer"
+                                                            >
+                                                                Bebaskan ke Semua Jabatan
+                                                            </button>
+                                                        )}
+                                                    </div>
+
+                                                    <div className="flex flex-wrap gap-1.5 pt-1">
+                                                        {positions.map((pos) => {
+                                                            const isSelected = (event.position_ids ?? []).includes(pos.id);
+                                                            return (
+                                                                <button
+                                                                    key={pos.id}
+                                                                    type="button"
+                                                                    onClick={() => {
+                                                                        const currentIds = event.position_ids ?? [];
+                                                                        const nextIds = isSelected
+                                                                            ? currentIds.filter((id) => id !== pos.id)
+                                                                            : [...currentIds, pos.id];
+                                                                        const newEvents = [...form.data.overtime_events];
+                                                                        newEvents[index].position_ids = nextIds;
+                                                                        form.setData('overtime_events', newEvents);
+                                                                    }}
+                                                                    className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-medium transition-all cursor-pointer border ${
+                                                                        isSelected
+                                                                            ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs'
+                                                                            : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100 hover:text-slate-800'
+                                                                    }`}
+                                                                >
+                                                                    {isSelected && <Check className="size-3" />}
+                                                                    {pos.name}
+                                                                </button>
+                                                            );
+                                                        })}
+                                                        {positions.length === 0 && (
+                                                            <p className="text-[11px] text-slate-400 italic">
+                                                                Belum ada master data jabatan terdaftar.
+                                                            </p>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            )}
+                            <InputError
+                                message={form.errors.overtime_events as string}
+                            />
+                        </div>
+
+                        <div className="space-y-4 rounded-lg border bg-slate-50/60 p-4">
+                            <label className="flex cursor-pointer items-start gap-3">
+                                <input
+                                    type="hidden"
+                                    name="auto_overtime_from_attendance"
+                                    value={
+                                        form.data.auto_overtime_from_attendance
+                                            ? '1'
+                                            : '0'
+                                    }
+                                />
+                                <input
+                                    id="auto_overtime_from_attendance"
+                                    type="checkbox"
+                                    checked={
+                                        form.data.auto_overtime_from_attendance
+                                    }
+                                    onChange={(event) =>
+                                        form.setData(
+                                            'auto_overtime_from_attendance',
+                                            event.target.checked,
+                                        )
+                                    }
+                                    className="mt-0.5 size-4 rounded border-input accent-primary"
+                                />
+                                <span>
+                                    <span className="block text-sm font-medium">
+                                        Otomatis catat lembur jika Clock Out
+                                        melebihi jam selesai shift
+                                    </span>
+                                    <span className="mt-1 block text-xs text-muted-foreground">
+                                        Saat karyawan absen pulang melebihi jam
+                                        shift, sistem otomatis membuat pengajuan
+                                        lembur dengan status &quot;Pending&quot;
+                                        (perlu approval).
+                                    </span>
+                                </span>
+                            </label>
+
+                            {form.data.auto_overtime_from_attendance && (
+                                <div className="ml-7 grid max-w-sm gap-2 pt-1">
+                                    <Label htmlFor="auto_overtime_min_minutes">
+                                        Minimal Kelebihan Menit (Batas Awal
+                                        Lembur)
+                                    </Label>
+                                    <Input
+                                        id="auto_overtime_min_minutes"
+                                        type="number"
+                                        min="1"
+                                        max="480"
+                                        value={
+                                            form.data.auto_overtime_min_minutes
+                                        }
+                                        onChange={(event) =>
+                                            form.setData(
+                                                'auto_overtime_min_minutes',
+                                                Number(event.target.value),
+                                            )
+                                        }
+                                    />
+                                    <p className="text-xs text-muted-foreground">
+                                        Contoh: 30 menit. Jika pulang lebih dari
+                                        30 menit setelah jam shift, kelebihan
+                                        tersebut otomatis dicatat lembur.
+                                    </p>
+                                    <InputError
+                                        message={
+                                            form.errors
+                                                .auto_overtime_min_minutes
+                                        }
+                                    />
+                                </div>
+                            )}
+                        </div>
+
+                        <label className="flex items-start gap-3 rounded-lg border bg-slate-50/60 p-4">
+                            <input
+                                type="hidden"
+                                name="auto_deduct_leave_for_missing_checkout"
+                                value={
+                                    form.data
+                                        .auto_deduct_leave_for_missing_checkout
+                                        ? '1'
+                                        : '0'
+                                }
+                            />
+                            <input
+                                id="auto_deduct_leave_for_missing_checkout"
+                                type="checkbox"
+                                checked={
+                                    form.data
+                                        .auto_deduct_leave_for_missing_checkout
+                                }
+                                onChange={(event) =>
+                                    form.setData(
+                                        'auto_deduct_leave_for_missing_checkout',
+                                        event.target.checked,
+                                    )
+                                }
+                                className="mt-0.5 size-4 rounded border-input accent-primary"
+                            />
+                            <span>
+                                <span className="block text-sm font-medium">
+                                    Potong saldo cuti bila lupa absen pulang
+                                </span>
+                                <span className="mt-1 block text-xs text-muted-foreground">
+                                    Dijalankan saat Sync Kehadiran atau
+                                    sinkronisasi otomatis malam hari.
+                                </span>
+                            </span>
+                        </label>
+
+                        <div className="rounded-lg border bg-card p-5 space-y-6">
+                            <div>
+                                <h3 className="text-base font-medium">Pengaturan BPJS & Asuransi Perusahaan</h3>
+                                <p className="text-xs text-muted-foreground">
+                                    Konfigurasi program BPJS Kesehatan, BPJS Ketenagakerjaan (JKK, JKM, JHT, JP), dan Asuransi Swasta Tambahan.
+                                </p>
+                            </div>
+
+                            {/* BPJS Kesehatan Section */}
+                            <div className="rounded-md border p-4 space-y-4 bg-slate-50/50">
+                                <label className="flex items-start gap-3">
+                                    <input
+                                        type="checkbox"
+                                        checked={form.data.bpjs_kesehatan_enabled}
+                                        onChange={(event) =>
+                                            form.setData('bpjs_kesehatan_enabled', event.target.checked)
+                                        }
+                                        className="mt-0.5 size-4 rounded border-input accent-primary"
+                                    />
+                                    <span>
+                                        <span className="block text-sm font-medium">
+                                            Aktifkan BPJS Kesehatan
+                                        </span>
+                                        <span className="mt-1 block text-xs text-muted-foreground">
+                                            Total 5% (4% Perusahaan, 1% Karyawan) dengan batas maksimal upah.
+                                        </span>
+                                    </span>
+                                </label>
+
+                                {form.data.bpjs_kesehatan_enabled && (
+                                    <div className="grid gap-4 sm:grid-cols-2 pt-2 border-t">
+                                        <div className="grid gap-2">
+                                            <Label htmlFor="bpjs_kesehatan_default_class">Kategori Kelas Default BPJS Kesehatan</Label>
+                                            <select
+                                                id="bpjs_kesehatan_default_class"
+                                                value={form.data.bpjs_kesehatan_default_class}
+                                                onChange={(e) =>
+                                                    form.setData('bpjs_kesehatan_default_class', e.target.value as 'I' | 'II' | 'III')
+                                                }
+                                                className="h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+                                            >
+                                                <option value="I">Kelas I (Satu)</option>
+                                                <option value="II">Kelas II (Dua)</option>
+                                                <option value="III">Kelas III (Tiga)</option>
+                                            </select>
+                                            <p className="text-xs text-muted-foreground">
+                                                Dapat disesuaikan secara spesifik pada masing-masing data karyawan.
+                                            </p>
+                                            <InputError message={form.errors.bpjs_kesehatan_default_class} />
+                                        </div>
+
+                                        <div className="grid gap-2">
+                                            <Label htmlFor="bpjs_kesehatan_wage_cap">Batas Maksimal Upah BPJS Kesehatan (Rp)</Label>
+                                            <Input
+                                                id="bpjs_kesehatan_wage_cap"
+                                                type="number"
+                                                min="0"
+                                                value={form.data.bpjs_kesehatan_wage_cap}
+                                                onChange={(event) =>
+                                                    form.setData('bpjs_kesehatan_wage_cap', Number(event.target.value))
+                                                }
+                                            />
+                                            <p className="text-xs text-muted-foreground">
+                                                Default batas atas: Rp 12.000.000
+                                            </p>
+                                            <InputError message={form.errors.bpjs_kesehatan_wage_cap} />
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* BPJS Ketenagakerjaan Section */}
+                            <div className="rounded-md border p-4 space-y-4 bg-slate-50/50">
+                                <label className="flex items-start gap-3">
+                                    <input
+                                        type="checkbox"
+                                        checked={form.data.bpjs_ketenagakerjaan_enabled}
+                                        onChange={(event) =>
+                                            form.setData('bpjs_ketenagakerjaan_enabled', event.target.checked)
+                                        }
+                                        className="mt-0.5 size-4 rounded border-input accent-primary"
+                                    />
+                                    <span>
+                                        <span className="block text-sm font-medium">
+                                            Aktifkan BPJS Ketenagakerjaan
+                                        </span>
+                                        <span className="mt-1 block text-xs text-muted-foreground">
+                                            Pilih program perlindungan jaminan sosial yang dijalankan untuk karyawan.
+                                        </span>
+                                    </span>
+                                </label>
+
+                                {form.data.bpjs_ketenagakerjaan_enabled && (
+                                    <div className="space-y-4 pt-2 border-t">
+                                        <div className="grid gap-3 grid-cols-1 sm:grid-cols-2 xl:grid-cols-4">
+                                            <label className="flex items-start gap-2.5 rounded-lg border bg-white p-3">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={form.data.bpjs_jkk_enabled}
+                                                    onChange={(e) =>
+                                                        form.setData('bpjs_jkk_enabled', e.target.checked)
+                                                    }
+                                                    className="mt-0.5 size-4 rounded border-input accent-primary"
+                                                />
+                                                <div>
+                                                    <span className="text-xs font-semibold block text-slate-900">JKK</span>
+                                                    <span className="text-[11px] text-muted-foreground block">
+                                                        Jaminan Kecelakaan Kerja ({form.data.bpjs_jkk_rate}%)
+                                                    </span>
+                                                </div>
+                                            </label>
+
+                                            <label className="flex items-start gap-2.5 rounded-lg border bg-white p-3">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={form.data.bpjs_jkm_enabled}
+                                                    onChange={(e) =>
+                                                        form.setData('bpjs_jkm_enabled', e.target.checked)
+                                                    }
+                                                    className="mt-0.5 size-4 rounded border-input accent-primary"
+                                                />
+                                                <div>
+                                                    <span className="text-xs font-semibold block text-slate-900">JKM</span>
+                                                    <span className="text-[11px] text-muted-foreground block">
+                                                        Jaminan Kematian (0.3% Perusahaan)
+                                                    </span>
+                                                </div>
+                                            </label>
+
+                                            <label className="flex items-start gap-2.5 rounded-lg border bg-white p-3">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={form.data.bpjs_jht_enabled}
+                                                    onChange={(e) =>
+                                                        form.setData('bpjs_jht_enabled', e.target.checked)
+                                                    }
+                                                    className="mt-0.5 size-4 rounded border-input accent-primary"
+                                                />
+                                                <div>
+                                                    <span className="text-xs font-semibold block text-slate-900">JHT</span>
+                                                    <span className="text-[11px] text-muted-foreground block">
+                                                        Jaminan Hari Tua (3.7% + 2%)
+                                                    </span>
+                                                </div>
+                                            </label>
+
+                                            <label className="flex items-start gap-2.5 rounded-lg border bg-white p-3">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={form.data.bpjs_jp_enabled}
+                                                    onChange={(e) =>
+                                                        form.setData('bpjs_jp_enabled', e.target.checked)
+                                                    }
+                                                    className="mt-0.5 size-4 rounded border-input accent-primary"
+                                                />
+                                                <div>
+                                                    <span className="text-xs font-semibold block text-slate-900">JP</span>
+                                                    <span className="text-[11px] text-muted-foreground block">
+                                                        Jaminan Pensiun (2% + 1%)
+                                                    </span>
+                                                </div>
+                                            </label>
+                                        </div>
+
+                                        <div className="grid gap-4 sm:grid-cols-2">
+                                            <div className="grid gap-2">
+                                                <Label htmlFor="bpjs_jkk_rate">Tarif Iuran JKK Perusahaan (%)</Label>
+                                                <Input
+                                                    id="bpjs_jkk_rate"
+                                                    type="number"
+                                                    step="0.001"
+                                                    min="0"
+                                                    value={form.data.bpjs_jkk_rate}
+                                                    onChange={(event) =>
+                                                        form.setData('bpjs_jkk_rate', Number(event.target.value))
+                                                    }
+                                                />
+                                                <p className="text-xs text-muted-foreground">
+                                                    Standar tingkat risiko sangat rendah: 0.24%
+                                                </p>
+                                                <InputError message={form.errors.bpjs_jkk_rate} />
+                                            </div>
+
+                                            <div className="grid gap-2">
+                                                <Label htmlFor="bpjs_jp_wage_cap">Batas Maksimal Upah JP (Rp)</Label>
+                                                <Input
+                                                    id="bpjs_jp_wage_cap"
+                                                    type="number"
+                                                    min="0"
+                                                    value={form.data.bpjs_jp_wage_cap}
+                                                    onChange={(event) =>
+                                                        form.setData('bpjs_jp_wage_cap', Number(event.target.value))
+                                                    }
+                                                />
+                                                <p className="text-xs text-muted-foreground">
+                                                    Default batas atas JP: Rp 10.042.300
+                                                </p>
+                                                <InputError message={form.errors.bpjs_jp_wage_cap} />
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* Asuransi Swasta Tambahan */}
+                            <div className="rounded-md border p-4 space-y-4 bg-slate-50/50">
+                                <label className="flex items-start gap-3">
+                                    <input
+                                        type="checkbox"
+                                        checked={form.data.private_insurance_enabled}
+                                        onChange={(event) =>
+                                            form.setData('private_insurance_enabled', event.target.checked)
+                                        }
+                                        className="mt-0.5 size-4 rounded border-input accent-primary"
+                                    />
+                                    <span>
+                                        <span className="block text-sm font-medium">
+                                            Gunakan Asuransi Swasta Tambahan
+                                        </span>
+                                        <span className="mt-1 block text-xs text-muted-foreground">
+                                            Aktifkan jika perusahaan menyediakan atau memfasilitasi asuransi kesehatan swasta tambahan (misal: Prudential, Allianz, AXA, Sinarmas, dll).
+                                        </span>
+                                    </span>
+                                </label>
+
+                                {form.data.private_insurance_enabled && (
+                                    <div className="grid gap-4 sm:grid-cols-2 pt-2 border-t">
+                                        <div className="grid gap-2">
+                                            <Label htmlFor="private_insurance_name">Nama Program Asuransi Swasta</Label>
+                                            <Input
+                                                id="private_insurance_name"
+                                                type="text"
+                                                placeholder="Contoh: Asuransi Prudential / Allianz"
+                                                value={form.data.private_insurance_name}
+                                                onChange={(event) =>
+                                                    form.setData('private_insurance_name', event.target.value)
+                                                }
+                                            />
+                                            <InputError message={form.errors.private_insurance_name} />
+                                        </div>
+
+                                        <div className="grid gap-2">
+                                            <Label htmlFor="private_insurance_nominal">Nominal Iuran / Premi Default per Karyawan (Rp)</Label>
+                                            <Input
+                                                id="private_insurance_nominal"
+                                                type="number"
+                                                min="0"
+                                                placeholder="0"
+                                                value={form.data.private_insurance_nominal}
+                                                onChange={(event) =>
+                                                    form.setData('private_insurance_nominal', Number(event.target.value))
+                                                }
+                                            />
+                                            <p className="text-xs text-muted-foreground">
+                                                Nominal ini juga dapat disesuaikan per individu pada formulir data karyawan.
+                                            </p>
+                                            <InputError message={form.errors.private_insurance_nominal} />
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+
+                        <Button disabled={form.processing}>
+                            Simpan Pengaturan
+                        </Button>
+                    </form>
+                </div>
+            </SettingsLayout>
+        </AppLayout>
+    );
+}

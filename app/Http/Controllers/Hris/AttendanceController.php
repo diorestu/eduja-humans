@@ -1,0 +1,1063 @@
+<?php
+
+namespace App\Http\Controllers\Hris;
+
+use App\Http\Controllers\Controller;
+use App\Http\Requests\Hris\StoreAttendanceRequest;
+use App\Http\Requests\Hris\UpdateAttendanceRequest;
+use App\Models\CompanySetting;
+use App\Models\Employee;
+use App\Models\EmployeeAttendance;
+use App\Models\EmployeeSchedule;
+use App\Models\LeaveRequest;
+use App\Services\AttendanceStatusService;
+use App\Services\MissingCheckoutLeaveSyncService;
+use App\Support\AttendancePhoto;
+use Barryvdh\DomPDF\Facade\Pdf;
+use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Validation\Rule;
+use Inertia\Inertia;
+use Inertia\Response;
+use Symfony\Component\HttpFoundation\Response as SymfonyResponse;
+use Symfony\Component\HttpFoundation\StreamedResponse;
+
+class AttendanceController extends Controller
+{
+    /**
+     * Display attendance page and monthly schedule panel.
+     */
+    public function index(Request $request): Response
+    {
+        $ownerId = $request->user()->accountOwnerId();
+
+        $validated = $request->validate([
+            'date' => ['nullable', 'date'],
+            'start_date' => ['nullable', 'date'],
+            'end_date' => ['nullable', 'date', 'after_or_equal:start_date'],
+            'status' => ['nullable', 'string'],
+            'employee_id' => ['nullable', 'integer', Rule::exists('employees', 'id')->where('user_id', $ownerId)],
+            'sort_by' => ['nullable', 'in:employee,attendance_date,check_in_at,check_out_at'],
+            'sort_dir' => ['nullable', 'in:asc,desc'],
+            'per_page' => ['nullable', 'in:10,25,50'],
+            'range' => ['nullable', 'in:today,this_week,this_month'],
+            'horizontal_range' => ['nullable', 'in:this_week,this_month,custom'],
+        ]);
+
+        $perPage = in_array((int) ($validated['per_page'] ?? $request->input('per_page')), [10, 25, 50], true)
+            ? (int) ($validated['per_page'] ?? $request->input('per_page'))
+            : 10;
+
+        $employees = Employee::query()
+            ->orderBy('first_name')
+            ->orderBy('last_name')
+            ->get(['id', 'employee_code', 'first_name', 'last_name']);
+
+        $startDate = $validated['start_date'] ?? $validated['date'] ?? today()->toDateString();
+        $endDate = $validated['end_date'] ?? $validated['date'] ?? $startDate;
+
+        $filters = [
+            'date' => $startDate,
+            'start_date' => $startDate,
+            'end_date' => $endDate,
+            'status' => $validated['status'] ?? '',
+            'employee_id' => isset($validated['employee_id']) ? (string) $validated['employee_id'] : '',
+            'sort_by' => $validated['sort_by'] ?? 'employee',
+            'sort_dir' => $validated['sort_dir'] ?? 'asc',
+            'per_page' => $perPage,
+            'horizontal_range' => $validated['horizontal_range'] ?? 'this_week',
+        ];
+
+        $attendancesQuery = EmployeeAttendance::query()
+            ->with(['employee:id,employee_code,first_name,last_name', 'backupForEmployee:id,employee_code,first_name,last_name', 'backupByEmployee:id,employee_code,first_name,last_name'])
+            ->when(
+                $filters['start_date'] === $filters['end_date'],
+                fn ($query) => $query->whereDate('attendance_date', $filters['start_date']),
+                fn ($query) => $query->whereBetween('attendance_date', [$filters['start_date'], $filters['end_date']]),
+            )
+            ->when($filters['status'] !== '', fn ($query) => $query->where('status', $filters['status']))
+            ->when($filters['employee_id'] !== '', fn ($query) => $query->where('employee_id', $filters['employee_id']));
+
+        if ($filters['sort_by'] === 'attendance_date') {
+            $attendancesQuery
+                ->orderBy('attendance_date', $filters['sort_dir'])
+                ->orderBy('employee_id', 'asc');
+        } elseif ($filters['sort_by'] === 'check_in_at') {
+            $attendancesQuery
+                ->orderByRaw('check_in_at IS NULL')
+                ->orderBy('check_in_at', $filters['sort_dir']);
+        } elseif ($filters['sort_by'] === 'check_out_at') {
+            $attendancesQuery
+                ->orderByRaw('check_out_at IS NULL')
+                ->orderBy('check_out_at', $filters['sort_dir']);
+        } else {
+            $attendancesQuery->orderBy('attendance_date', 'desc')->orderBy('employee_id', $filters['sort_dir']);
+        }
+
+        $attendancesPaginator = $attendancesQuery
+            ->paginate($perPage)
+            ->withQueryString();
+
+        $employeeIds = collect($attendancesPaginator->items())
+            ->pluck('employee_id')
+            ->unique()
+            ->values();
+
+        $shiftByEmployee = $employeeIds->isEmpty()
+            ? collect()
+            : EmployeeSchedule::query()
+                ->whereBetween('work_date', [$filters['start_date'], $filters['end_date']])
+                ->whereIn('employee_id', $employeeIds)
+                ->get()
+                ->groupBy(fn (EmployeeSchedule $s) => $s->employee_id.'_'.$s->work_date->toDateString());
+
+        $attendances = $attendancesPaginator->through(function (EmployeeAttendance $attendance) use ($shiftByEmployee) {
+            $dateStr = $attendance->attendance_date->format('Y-m-d');
+            $shiftSchedule = $shiftByEmployee->get($attendance->employee_id.'_'.$dateStr)?->first();
+
+            return [
+                'id' => $attendance->id,
+                'employee_id' => $attendance->employee_id,
+                'employee_label' => $attendance->employee
+                    ? $attendance->employee->employee_code.' - '.$attendance->employee->full_name
+                    : '-',
+                'attendance_date' => $dateStr,
+                'timezone' => $attendance->timezone,
+                'shift_name' => (string) ($shiftSchedule?->shift_code ?? 'OFF'),
+                'status' => $attendance->status,
+                'is_backup' => (bool) ($attendance->is_backup ?? false),
+                'backup_for_employee' => $attendance->backupForEmployee ? [
+                    'id' => $attendance->backupForEmployee->id,
+                    'employee_code' => $attendance->backupForEmployee->employee_code,
+                    'full_name' => $attendance->backupForEmployee->full_name,
+                ] : null,
+                'backup_by_employee' => $attendance->backupByEmployee ? [
+                    'id' => $attendance->backupByEmployee->id,
+                    'employee_code' => $attendance->backupByEmployee->employee_code,
+                    'full_name' => $attendance->backupByEmployee->full_name,
+                ] : null,
+                'late_minutes' => $attendance->late_minutes,
+                'late_duration_label' => $this->formatLateDuration($attendance->late_minutes),
+                'late_level' => $attendance->late_level,
+                'late_penalty' => (float) ($attendance->late_penalty ?? 0),
+                'is_half_day' => (bool) ($attendance->is_half_day ?? false),
+                'check_in_at' => $attendance->check_in_at?->toIso8601String(),
+                'check_in_latitude' => $attendance->check_in_latitude !== null ? (float) $attendance->check_in_latitude : null,
+                'check_in_longitude' => $attendance->check_in_longitude !== null ? (float) $attendance->check_in_longitude : null,
+                'check_out_at' => $attendance->check_out_at?->toIso8601String(),
+                'check_out_latitude' => $attendance->check_out_latitude !== null ? (float) $attendance->check_out_latitude : null,
+                'check_out_longitude' => $attendance->check_out_longitude !== null ? (float) $attendance->check_out_longitude : null,
+                'check_in_photo_url' => $attendance->check_in_photo_url,
+                'check_out_photo_url' => $attendance->check_out_photo_url,
+                'face_similarity_score' => $attendance->face_similarity_score !== null ? (float) $attendance->face_similarity_score : null,
+                'has_photo' => ! empty($attendance->check_in_photo_url) || ! empty($attendance->check_out_photo_url),
+                'notes' => $attendance->notes,
+            ];
+        });
+
+        $todaySummaryRows = EmployeeAttendance::query()
+            ->selectRaw('status, COUNT(*) as total')
+            ->whereDate('attendance_date', today())
+            ->groupBy('status')
+            ->pluck('total', 'status');
+
+        $chartRange = $validated['range'] ?? 'this_week';
+        $today = Carbon::today();
+
+        $chartStartDate = match ($chartRange) {
+            'today' => $today->copy(),
+            'this_month' => $today->copy()->startOfMonth(),
+            default => $today->copy()->startOfWeek(),
+        };
+
+        $chartEndDate = match ($chartRange) {
+            'today' => $today->copy(),
+            'this_month' => $today->copy()->endOfMonth(),
+            default => $today->copy(),
+        };
+
+        $dailyRaw = EmployeeAttendance::query()
+            ->where('user_id', $ownerId)
+            ->selectRaw('attendance_date, status, COUNT(*) as total')
+            ->whereBetween('attendance_date', [$chartStartDate->toDateString(), $chartEndDate->toDateString()])
+            ->groupBy('attendance_date', 'status')
+            ->orderBy('attendance_date')
+            ->get();
+
+        $dailyGrouped = $dailyRaw->groupBy(
+            fn (EmployeeAttendance $attendance) => $attendance->attendance_date->toDateString()
+        );
+
+        $dates = collect();
+        $cursor = $chartStartDate->copy();
+
+        while ($cursor->lte($chartEndDate)) {
+            $dates->push($cursor->copy());
+            $cursor = $cursor->addDay();
+        }
+
+        $activeEmployees = Employee::query()
+            ->where('user_id', $ownerId)
+            ->where('is_active', true)
+            ->count();
+
+        $attendanceChart = $dates->map(function ($date) use ($dailyGrouped, $activeEmployees) {
+            $dateKey = $date->toDateString();
+            $rows = collect($dailyGrouped->get($dateKey, []));
+            $counts = $rows->pluck('total', 'status');
+
+            $present = (int) ($counts['present'] ?? 0);
+            $late = (int) ($counts['late'] ?? 0);
+            $onLeave = (int) ($counts['on_leave'] ?? 0);
+            $fallbackAbsent = max($activeEmployees - ($present + $late + $onLeave), 0);
+            $absent = (int) ($counts['absent'] ?? $fallbackAbsent);
+
+            $attendanceRate = $activeEmployees > 0
+                ? round((($present + $late) / $activeEmployees) * 100, 1)
+                : 0;
+
+            return [
+                'date' => $dateKey,
+                'label' => $date->format('d M'),
+                'present' => $present,
+                'late' => $late,
+                'on_leave' => $onLeave,
+                'absent' => $absent,
+                'attendance_rate' => $attendanceRate,
+            ];
+        })->values();
+
+        $horizontalRange = $validated['horizontal_range'] ?? 'this_week';
+
+        if ($horizontalRange === 'this_month') {
+            $hStartDate = today()->startOfMonth();
+            $hEndDate = today()->endOfMonth();
+        } elseif ($horizontalRange === 'custom' && $filters['start_date'] !== $filters['end_date']) {
+            $hStartDate = Carbon::parse($filters['start_date']);
+            $hEndDate = Carbon::parse($filters['end_date']);
+            if ($hEndDate->diffInDays($hStartDate) > 31) {
+                $hEndDate = $hStartDate->copy()->addDays(31);
+            }
+        } else {
+            $hStartDate = today()->startOfWeek();
+            $hEndDate = today()->endOfWeek();
+        }
+
+        $allEmployees = Employee::query()
+            ->where('user_id', $ownerId)
+            ->where('is_active', true)
+            ->when($filters['employee_id'] !== '', fn ($q) => $q->where('id', $filters['employee_id']))
+            ->orderBy('employee_code')
+            ->get(['id', 'employee_code', 'first_name', 'last_name', 'timezone']);
+
+        $allAttendances = EmployeeAttendance::query()
+            ->where('user_id', $ownerId)
+            ->whereBetween('attendance_date', [$hStartDate->toDateString(), $hEndDate->toDateString()])
+            ->when($filters['employee_id'] !== '', fn ($q) => $q->where('employee_id', $filters['employee_id']))
+            ->get(['id', 'employee_id', 'attendance_date', 'status', 'check_in_at', 'check_out_at', 'late_minutes'])
+            ->groupBy(fn ($a) => $a->employee_id.'_'.$a->attendance_date->toDateString());
+
+        $allSchedules = EmployeeSchedule::query()
+            ->where('user_id', $ownerId)
+            ->whereBetween('work_date', [$hStartDate->toDateString(), $hEndDate->toDateString()])
+            ->when($filters['employee_id'] !== '', fn ($q) => $q->where('employee_id', $filters['employee_id']))
+            ->get(['id', 'employee_id', 'work_date', 'shift_code', 'is_day_off', 'is_wfa', 'start_time', 'end_time'])
+            ->groupBy(fn ($s) => $s->employee_id.'_'.$s->work_date->toDateString());
+
+        $allLeaves = LeaveRequest::query()
+            ->where('user_id', $ownerId)
+            ->where('status', 'approved')
+            ->whereDate('start_date', '<=', $hEndDate->toDateString())
+            ->whereDate('end_date', '>=', $hStartDate->toDateString())
+            ->when($filters['employee_id'] !== '', fn ($q) => $q->where('employee_id', $filters['employee_id']))
+            ->get(['id', 'employee_id', 'leave_type', 'start_date', 'end_date', 'reason']);
+
+        $leavesByEmployeeDate = collect();
+        foreach ($allLeaves as $l) {
+            $lStart = Carbon::parse($l->start_date)->max($hStartDate);
+            $lEnd = Carbon::parse($l->end_date)->min($hEndDate);
+            for ($d = $lStart->copy(); $d->lte($lEnd); $d = $d->addDay()) {
+                $leavesByEmployeeDate->put($l->employee_id.'_'.$d->toDateString(), $l);
+            }
+        }
+
+        $hDates = collect();
+        $curr = $hStartDate->copy();
+        while ($curr->lte($hEndDate)) {
+            $dayName = match ($curr->dayOfWeek) {
+                Carbon::MONDAY => 'Sen',
+                Carbon::TUESDAY => 'Sel',
+                Carbon::WEDNESDAY => 'Rab',
+                Carbon::THURSDAY => 'Kam',
+                Carbon::FRIDAY => 'Jum',
+                Carbon::SATURDAY => 'Sab',
+                Carbon::SUNDAY => 'Min',
+            };
+            $hDates->push([
+                'date' => $curr->toDateString(),
+                'day_name' => $dayName,
+                'day_num' => $curr->format('d'),
+                'month_short' => $curr->translatedFormat('M'),
+                'is_today' => $curr->isToday(),
+                'is_weekend' => $curr->isWeekend(),
+                'is_past' => $curr->lt(today()),
+            ]);
+            $curr = $curr->addDay();
+        }
+
+        $horizontalRows = $allEmployees->map(function (Employee $emp) use ($hDates, $allAttendances, $allSchedules, $leavesByEmployeeDate) {
+            $days = [];
+            $summary = [
+                'present' => 0,
+                'late' => 0,
+                'on_leave' => 0,
+                'absent' => 0,
+                'missing' => 0,
+                'wfa' => 0,
+            ];
+
+            foreach ($hDates as $dateInfo) {
+                $dateKey = $dateInfo['date'];
+                $sched = $allSchedules->get($emp->id.'_'.$dateKey)?->first();
+                $att = $allAttendances->get($emp->id.'_'.$dateKey)?->first();
+                $leave = $leavesByEmployeeDate->get($emp->id.'_'.$dateKey);
+
+                $shiftCode = $sched?->shift_code;
+                $isDayOff = (bool) ($sched?->is_day_off ?? false);
+                $isWfa = (bool) ($sched?->is_wfa ?? false);
+
+                if ($att) {
+                    $status = $att->status;
+                    if ($status === 'present' && ($att->late_minutes ?? 0) > 0) {
+                        $status = 'late';
+                    } elseif ($leave && ($status === 'absent' || $status === 'on_leave' || $att->check_in_at === null)) {
+                        $status = 'on_leave';
+                    }
+                    if (isset($summary[$status])) {
+                        $summary[$status]++;
+                    }
+                } else {
+                    if ($leave) {
+                        $status = 'on_leave';
+                        $summary['on_leave']++;
+                    } elseif ($isDayOff || $shiftCode === 'OFF' || ($dateInfo['is_weekend'] && ! $sched)) {
+                        $status = 'off';
+                    } elseif ($isWfa) {
+                        $status = 'wfa';
+                        $summary['wfa']++;
+                    } elseif ($dateInfo['is_past'] || $dateInfo['is_today']) {
+                        $status = 'missing';
+                        $summary['missing']++;
+                    } else {
+                        $status = 'scheduled';
+                    }
+                }
+
+                $leaveTypeLabel = match ($leave?->leave_type) {
+                    'annual' => 'Cuti Tahunan',
+                    'sick' => 'Izin Sakit',
+                    'unpaid' => 'Cuti Tanpa Upah',
+                    'other' => 'Izin Lainnya',
+                    default => 'Cuti',
+                };
+
+                $statusLabel = match ($status) {
+                    'present' => 'Hadir',
+                    'late' => 'Terlambat'.($att && $att->late_minutes ? " ({$att->late_minutes}m)" : ''),
+                    'on_leave' => $leaveTypeLabel,
+                    'absent' => 'Absen',
+                    'missing' => 'Tidak Absen',
+                    'wfa' => 'WFA',
+                    'off' => 'Libur (OFF)',
+                    'scheduled' => 'Terjadwal',
+                    default => ucfirst($status),
+                };
+
+                $cellShiftCode = $shiftCode ?: ($status === 'on_leave' ? 'CUTI' : ($status === 'off' ? 'OFF' : ($sched ? 'REG' : '-')));
+
+                $checkInStr = $att?->check_in_at ? Carbon::parse($att->check_in_at)->format('H:i') : null;
+                $checkOutStr = $att?->check_out_at ? Carbon::parse($att->check_out_at)->format('H:i') : null;
+
+                $days[$dateKey] = [
+                    'shift_code' => $cellShiftCode,
+                    'status' => $status,
+                    'status_label' => $statusLabel,
+                    'check_in' => $checkInStr,
+                    'check_out' => $checkOutStr,
+                    'late_minutes' => $att?->late_minutes,
+                ];
+            }
+
+            return [
+                'employee_id' => $emp->id,
+                'employee_code' => $emp->employee_code,
+                'employee_name' => $emp->full_name,
+                'days' => $days,
+                'summary' => $summary,
+            ];
+        })->values();
+
+        $horizontalView = [
+            'dates' => $hDates->values(),
+            'rows' => $horizontalRows,
+            'range' => $horizontalRange,
+            'start_date' => $hStartDate->toDateString(),
+            'end_date' => $hEndDate->toDateString(),
+        ];
+
+        $todayPresent = (int) ($todaySummaryRows['present'] ?? 0);
+        $todayLate = (int) ($todaySummaryRows['late'] ?? 0);
+        $todayOnLeave = (int) ($todaySummaryRows['on_leave'] ?? 0);
+        $todayFallbackAbsent = max($activeEmployees - ($todayPresent + $todayLate + $todayOnLeave), 0);
+
+        return Inertia::render('hris/attendances/index', [
+            'attendances' => $attendances,
+            'attendanceChart' => $attendanceChart,
+            'chartRange' => $chartRange,
+            'horizontalView' => $horizontalView,
+            'employees' => $employees->map(fn (Employee $employee) => [
+                'id' => $employee->id,
+                'label' => $employee->employee_code.' - '.$employee->full_name,
+            ]),
+            'filters' => $filters,
+            'todaySummary' => [
+                'present' => $todayPresent,
+                'late' => $todayLate,
+                'on_leave' => $todayOnLeave,
+                'absent' => (int) ($todaySummaryRows['absent'] ?? $todayFallbackAbsent),
+            ],
+            'statusOptions' => ['present', 'late', 'on_leave', 'wfa', 'absent'],
+        ]);
+    }
+
+    /**
+     * Display a monthly attendance history for one employee.
+     */
+    public function showMonthly(Request $request, Employee $employee): Response
+    {
+        abort_unless($employee->user_id === $request->user()->accountOwnerId(), 404);
+
+        $validated = $request->validate([
+            'period' => ['nullable', 'date_format:Y-m'],
+        ]);
+
+        $period = $validated['period'] ?? today()->format('Y-m');
+        $start = Carbon::createFromFormat('Y-m-d', $period.'-01')->startOfMonth();
+        $end = $start->copy()->endOfMonth();
+
+        $attendanceByDate = EmployeeAttendance::query()
+            ->with(['shift:id,code,name,start_time,end_time,is_day_off', 'backupForEmployee:id,employee_code,first_name,last_name', 'backupByEmployee:id,employee_code,first_name,last_name'])
+            ->where('employee_id', $employee->id)
+            ->whereBetween('attendance_date', [$start->toDateString(), $end->toDateString()])
+            ->orderBy('attendance_date')
+            ->orderBy('id')
+            ->get()
+            ->keyBy(fn (EmployeeAttendance $attendance) => $attendance->attendance_date->toDateString());
+
+        $scheduleByDate = EmployeeSchedule::query()
+            ->where('employee_id', $employee->id)
+            ->whereBetween('work_date', [$start->toDateString(), $end->toDateString()])
+            ->get(['work_date', 'shift_code', 'is_wfa', 'is_day_off'])
+            ->keyBy(fn (EmployeeSchedule $schedule) => $schedule->work_date->toDateString());
+
+        $leaves = LeaveRequest::query()
+            ->where('employee_id', $employee->id)
+            ->where('status', 'approved')
+            ->whereDate('start_date', '<=', $end->toDateString())
+            ->whereDate('end_date', '>=', $start->toDateString())
+            ->get(['id', 'leave_type', 'start_date', 'end_date', 'reason']);
+
+        $leaveByDate = collect();
+        foreach ($leaves as $leave) {
+            $leaveStart = Carbon::parse($leave->start_date)->max($start);
+            $leaveEnd = Carbon::parse($leave->end_date)->min($end);
+
+            for ($d = $leaveStart->copy(); $d->lte($leaveEnd); $d = $d->addDay()) {
+                $leaveByDate->put($d->toDateString(), $leave);
+            }
+        }
+
+        $rows = collect();
+        for ($date = $start->copy(); $date->lte($end); $date = $date->addDay()) {
+            $dateKey = $date->toDateString();
+            $attendance = $attendanceByDate->get($dateKey);
+            $sched = $scheduleByDate->get($dateKey);
+            $leave = $leaveByDate->get($dateKey);
+            $isWfa = (bool) ($sched?->is_wfa ?? false);
+            $isOff = (bool) ($sched?->is_day_off ?? false) || $sched?->shift_code === 'OFF';
+
+            $leaveTypeLabel = match ($leave?->leave_type) {
+                'annual' => 'Cuti Tahunan',
+                'sick' => 'Izin Sakit',
+                'unpaid' => 'Cuti Tanpa Upah',
+                'other' => 'Izin Lainnya',
+                default => 'Cuti',
+            };
+            $leaveNote = $leave ? ($leave->reason ? $leaveTypeLabel.': '.$leave->reason : $leaveTypeLabel) : null;
+
+            if ($attendance) {
+                $status = $attendance->status;
+                $isMissing = false;
+                $notes = $attendance->notes;
+
+                if ($leave && ($status === 'absent' || $status === 'on_leave' || $attendance->check_in_at === null)) {
+                    $status = 'on_leave';
+                    $notes = $leaveNote ?? $notes;
+                }
+
+                $rows->push([
+                    'id' => $attendance->id,
+                    'attendance_date' => $dateKey,
+                    'timezone' => $attendance->timezone,
+                    'shift_name' => $attendance->shift?->name
+                        ?? $attendance->shift?->code
+                        ?? $sched?->shift_code
+                        ?? ($status === 'on_leave' ? ($sched?->shift_code ?? 'Cuti') : 'OFF'),
+                    'status' => $status,
+                    'is_backup' => (bool) ($attendance->is_backup ?? false),
+                    'backup_for_employee' => $attendance->backupForEmployee ? [
+                        'id' => $attendance->backupForEmployee->id,
+                        'employee_code' => $attendance->backupForEmployee->employee_code,
+                        'full_name' => $attendance->backupForEmployee->full_name,
+                    ] : null,
+                    'late_minutes' => $attendance->late_minutes,
+                    'late_duration_label' => $this->formatLateDuration($attendance->late_minutes),
+                    'late_level' => $attendance->late_level,
+                    'late_penalty' => (float) ($attendance->late_penalty ?? 0),
+                    'is_half_day' => (bool) ($attendance->is_half_day ?? false),
+                    'check_in_at' => $attendance->check_in_at?->toIso8601String(),
+                    'check_in_latitude' => $attendance->check_in_latitude !== null ? (float) $attendance->check_in_latitude : null,
+                    'check_in_longitude' => $attendance->check_in_longitude !== null ? (float) $attendance->check_in_longitude : null,
+                    'check_out_at' => $attendance->check_out_at?->toIso8601String(),
+                    'check_out_latitude' => $attendance->check_out_latitude !== null ? (float) $attendance->check_out_latitude : null,
+                    'check_out_longitude' => $attendance->check_out_longitude !== null ? (float) $attendance->check_out_longitude : null,
+                    'check_in_photo_url' => $attendance->check_in_photo_url,
+                    'check_out_photo_url' => $attendance->check_out_photo_url,
+                    'face_similarity_score' => $attendance->face_similarity_score !== null ? (float) $attendance->face_similarity_score : null,
+                    'has_photo' => ! empty($attendance->check_in_photo_url) || ! empty($attendance->check_out_photo_url),
+                    'notes' => $notes,
+                    'is_missing' => $isMissing,
+                ]);
+            } else {
+                if ($leave) {
+                    $status = 'on_leave';
+                    $isMissing = false;
+                    $notes = $leaveNote;
+                } else {
+                    $status = $isOff ? 'off' : ($isWfa ? 'wfa' : 'absent');
+                    $isMissing = ! $isWfa && ! $isOff;
+                    $notes = $isWfa ? 'Shift WFA (Bebas Absensi)' : null;
+                }
+
+                $rows->push([
+                    'id' => null,
+                    'attendance_date' => $dateKey,
+                    'timezone' => $employee->timezone,
+                    'shift_name' => $sched?->shift_code ?? ($leave ? 'Cuti' : 'OFF'),
+                    'status' => $status,
+                    'late_minutes' => null,
+                    'late_level' => null,
+                    'late_penalty' => 0.0,
+                    'is_half_day' => false,
+                    'check_in_at' => null,
+                    'check_in_latitude' => null,
+                    'check_in_longitude' => null,
+                    'check_out_at' => null,
+                    'check_out_latitude' => null,
+                    'check_out_longitude' => null,
+                    'check_in_photo_url' => null,
+                    'check_out_photo_url' => null,
+                    'face_similarity_score' => null,
+                    'has_photo' => false,
+                    'notes' => $notes,
+                    'is_missing' => $isMissing,
+                ]);
+            }
+        }
+
+        $summary = $rows
+            ->countBy('status');
+
+        return Inertia::render('hris/attendances/monthly', [
+            'employee' => [
+                'id' => $employee->id,
+                'employee_code' => $employee->employee_code,
+                'full_name' => $employee->full_name,
+                'label' => $employee->employee_code.' - '.$employee->full_name,
+            ],
+            'filters' => [
+                'period' => $period,
+            ],
+            'period' => [
+                'key' => $period,
+                'label' => $start->translatedFormat('F Y'),
+                'start_date' => $start->toDateString(),
+                'end_date' => $end->toDateString(),
+            ],
+            'summary' => [
+                'total' => $rows->count(),
+                'present' => (int) ($summary['present'] ?? 0),
+                'wfa' => (int) ($summary['wfa'] ?? 0),
+                'late' => (int) ($summary['late'] ?? 0),
+                'on_leave' => (int) ($summary['on_leave'] ?? 0),
+                'absent' => (int) ($summary['absent'] ?? 0),
+            ],
+            'attendances' => $rows,
+        ]);
+    }
+
+    public function syncMissingCheckouts(Request $request, MissingCheckoutLeaveSyncService $syncService): RedirectResponse
+    {
+        $validated = $request->validate(['date' => ['required', 'date']]);
+        $result = $syncService->sync($request->user()->accountOwnerId(), $validated['date']);
+
+        return back()->with('success', "Sync selesai: {$result['clocked_out']} absensi ditutup, {$result['leave_deducted']} saldo cuti dipotong.");
+    }
+
+    public function syncLateness(Request $request, AttendanceStatusService $statusService): RedirectResponse
+    {
+        $ownerId = $request->user()->accountOwnerId();
+
+        $validated = $request->validate([
+            'start_date' => ['nullable', 'date'],
+            'end_date' => ['nullable', 'date', 'after_or_equal:start_date'],
+            'date' => ['nullable', 'date'],
+            'employee_id' => ['nullable', 'integer', Rule::exists('employees', 'id')->where('user_id', $ownerId)],
+            'all' => ['nullable', 'boolean'],
+        ]);
+
+        $startDate = $validated['start_date'] ?? $validated['date'] ?? null;
+        $endDate = $validated['end_date'] ?? $validated['date'] ?? $startDate;
+
+        if (! empty($validated['all'])) {
+            $startDate = null;
+            $endDate = null;
+        }
+
+        $employeeId = ! empty($validated['employee_id']) ? (int) $validated['employee_id'] : null;
+
+        $result = $statusService->syncLateness($ownerId, $startDate, $endDate, $employeeId);
+
+        $rangeInfo = $startDate && $endDate
+            ? ($startDate === $endDate ? "tanggal {$startDate}" : "rentang {$startDate} s/d {$endDate}")
+            : ($startDate ? "tanggal {$startDate}" : 'seluruh data presensi');
+
+        $detailParts = ["{$result['total']} data diperiksa", "{$result['updated']} diperbarui", "{$result['late']} terlambat", "{$result['on_time']} tepat waktu"];
+        if ($result['leave_deducted'] > 0) {
+            $detailParts[] = "{$result['leave_deducted']} saldo cuti dipotong (setengah hari)";
+        }
+
+        return back()->with(
+            'success',
+            "Sinkronisasi keterlambatan selesai ({$rangeInfo}): ".implode(', ', $detailParts).'.'
+        );
+    }
+
+    /**
+     * Store new attendance record.
+     */
+    public function store(StoreAttendanceRequest $request, AttendanceStatusService $statusService): RedirectResponse
+    {
+        $validated = $request->validated();
+        $ownerId = $request->user()->accountOwnerId();
+        $timezone = $this->deviceTimezone($request);
+        $this->normalizeAttendanceTimestamps($validated, $timezone);
+        $validated = array_merge($validated, $statusService->resolveStatusAttributes($validated, $ownerId, $timezone));
+
+        $attendance = EmployeeAttendance::updateOrCreate(
+            [
+                'employee_id' => $validated['employee_id'],
+                'attendance_date' => $validated['attendance_date'],
+            ],
+            [
+                'status' => $validated['status'],
+                'timezone' => $timezone,
+                'late_minutes' => $validated['late_minutes'] ?? null,
+                'late_level' => $validated['late_level'] ?? null,
+                'late_penalty' => $validated['late_penalty'] ?? 0,
+                'is_half_day' => (bool) ($validated['is_half_day'] ?? false),
+                'check_in_at' => $validated['check_in_at'] ?? null,
+                'check_out_at' => $validated['check_out_at'] ?? null,
+                'notes' => $validated['notes'] ?? null,
+            ]
+        );
+
+        app(\App\Services\AutoOvertimeService::class)->syncFromAttendance($attendance, $ownerId, $timezone);
+
+        return back();
+    }
+
+    /**
+     * Update attendance record.
+     */
+    public function update(UpdateAttendanceRequest $request, EmployeeAttendance $employeeAttendance, AttendanceStatusService $statusService): RedirectResponse
+    {
+        $validated = $request->validated();
+        $timezone = $this->deviceTimezone($request);
+        $this->normalizeAttendanceTimestamps($validated, $timezone);
+        $validated['timezone'] = $timezone;
+        $validated = array_merge($validated, $statusService->resolveStatusAttributes($validated, $request->user()->accountOwnerId(), $timezone));
+
+        if ($request->hasFile('check_in_photo')) {
+            $file = $request->file('check_in_photo');
+            $binary = file_get_contents($file->getRealPath());
+            $ext = $file->getClientOriginalExtension() ?: 'jpg';
+            $validated['check_in_photo_url'] = AttendancePhoto::storePhoto($binary, 'in', (int) $employeeAttendance->employee_id, $ext);
+        } elseif (! empty($validated['check_in_photo']) && str_starts_with($validated['check_in_photo'], 'data:image/')) {
+            $photoResult = AttendancePhoto::validate($validated['check_in_photo']);
+            if ($photoResult['valid']) {
+                $validated['check_in_photo_url'] = AttendancePhoto::storePhoto($photoResult['binary'], 'in', (int) $employeeAttendance->employee_id, $photoResult['ext'] ?? 'jpg');
+            }
+        }
+        unset($validated['check_in_photo']);
+
+        if ($request->hasFile('check_out_photo')) {
+            $file = $request->file('check_out_photo');
+            $binary = file_get_contents($file->getRealPath());
+            $ext = $file->getClientOriginalExtension() ?: 'jpg';
+            $validated['check_out_photo_url'] = AttendancePhoto::storePhoto($binary, 'out', (int) $employeeAttendance->employee_id, $ext);
+        } elseif (! empty($validated['check_out_photo']) && str_starts_with($validated['check_out_photo'], 'data:image/')) {
+            $photoResult = AttendancePhoto::validate($validated['check_out_photo']);
+            if ($photoResult['valid']) {
+                $validated['check_out_photo_url'] = AttendancePhoto::storePhoto($photoResult['binary'], 'out', (int) $employeeAttendance->employee_id, $photoResult['ext'] ?? 'jpg');
+            }
+        }
+        unset($validated['check_out_photo']);
+
+        $employeeAttendance->update($validated);
+
+        app(\App\Services\AutoOvertimeService::class)->syncFromAttendance($employeeAttendance, $request->user()->accountOwnerId(), $timezone);
+
+        return back();
+    }
+
+    /**
+     * Upload or re-upload attendance photo.
+     */
+    public function uploadPhoto(Request $request, EmployeeAttendance $employeeAttendance): RedirectResponse
+    {
+        $request->validate([
+            'type' => ['required', 'in:in,out'],
+            'photo' => ['required'],
+        ]);
+
+        $type = $request->input('type');
+        $binary = null;
+        $ext = 'jpg';
+
+        if ($request->hasFile('photo')) {
+            $file = $request->file('photo');
+            $binary = file_get_contents($file->getRealPath());
+            $ext = $file->getClientOriginalExtension() ?: 'jpg';
+        } elseif (is_string($request->input('photo')) && str_starts_with($request->input('photo'), 'data:image/')) {
+            $photoResult = AttendancePhoto::validate($request->input('photo'));
+            if (! $photoResult['valid']) {
+                return back()->withErrors(['photo' => $photoResult['error'] ?? 'Format foto tidak valid.']);
+            }
+            $binary = $photoResult['binary'];
+            $ext = $photoResult['ext'] ?? 'jpg';
+        }
+
+        if ($binary === null) {
+            return back()->withErrors(['photo' => 'File foto tidak ditemukan atau tidak valid.']);
+        }
+
+        $photoUrl = AttendancePhoto::storePhoto($binary, $type, (int) $employeeAttendance->employee_id, $ext);
+
+        if ($type === 'in') {
+            $employeeAttendance->update(['check_in_photo_url' => $photoUrl]);
+        } else {
+            $employeeAttendance->update(['check_out_photo_url' => $photoUrl]);
+        }
+
+        return back()->with('success', 'Foto kehadiran berhasil diperbarui.');
+    }
+
+    /**
+     * Delete attendance record.
+     */
+    public function destroy(EmployeeAttendance $employeeAttendance): RedirectResponse
+    {
+        $employeeAttendance->delete();
+
+        return back();
+    }
+
+    /**
+     * Export attendance records to XLS or PDF file.
+     */
+    public function export(Request $request): SymfonyResponse
+    {
+        $ownerId = $request->user()->accountOwnerId();
+
+        $validated = $request->validate([
+            'date' => ['nullable', 'date'],
+            'start_date' => ['nullable', 'date'],
+            'end_date' => ['nullable', 'date', 'after_or_equal:start_date'],
+            'status' => ['nullable', 'string'],
+            'employee_id' => ['nullable', 'integer', Rule::exists('employees', 'id')->where('user_id', $ownerId)],
+            'sort_by' => ['nullable', 'in:employee,attendance_date,check_in_at,check_out_at'],
+            'sort_dir' => ['nullable', 'in:asc,desc'],
+            'format' => ['nullable', 'in:xls,pdf'],
+        ]);
+
+        $startDate = $validated['start_date'] ?? $validated['date'] ?? today()->toDateString();
+        $endDate = $validated['end_date'] ?? $validated['date'] ?? $startDate;
+        $format = $validated['format'] ?? 'xls';
+
+        $filters = [
+            'date' => $startDate,
+            'start_date' => $startDate,
+            'end_date' => $endDate,
+            'status' => $validated['status'] ?? '',
+            'employee_id' => isset($validated['employee_id']) ? (string) $validated['employee_id'] : '',
+            'sort_by' => $validated['sort_by'] ?? 'employee',
+            'sort_dir' => $validated['sort_dir'] ?? 'asc',
+            'format' => $format,
+        ];
+
+        $query = EmployeeAttendance::query()
+            ->with(['employee:id,employee_code,first_name,last_name', 'backupForEmployee:id,employee_code,first_name,last_name', 'backupByEmployee:id,employee_code,first_name,last_name'])
+            ->when(
+                $filters['start_date'] === $filters['end_date'],
+                fn ($builder) => $builder->whereDate('attendance_date', $filters['start_date']),
+                fn ($builder) => $builder->whereBetween('attendance_date', [$filters['start_date'], $filters['end_date']]),
+            )
+            ->when($filters['status'] !== '', fn ($builder) => $builder->where('status', $filters['status']))
+            ->when($filters['employee_id'] !== '', fn ($builder) => $builder->where('employee_id', $filters['employee_id']));
+
+        if ($filters['sort_by'] === 'attendance_date') {
+            $query->orderBy('attendance_date', $filters['sort_dir'])->orderBy('employee_id', 'asc');
+        } elseif ($filters['sort_by'] === 'check_in_at') {
+            $query->orderByRaw('check_in_at IS NULL')->orderBy('check_in_at', $filters['sort_dir']);
+        } elseif ($filters['sort_by'] === 'check_out_at') {
+            $query->orderByRaw('check_out_at IS NULL')->orderBy('check_out_at', $filters['sort_dir']);
+        } else {
+            $query->orderBy('attendance_date', 'desc')->orderBy('employee_id', $filters['sort_dir']);
+        }
+
+        $rows = $query->get();
+        $company = CompanySetting::query()
+            ->where('user_id', $ownerId)
+            ->first();
+        $timezone = $this->deviceTimezone($request);
+        $timezoneAbbr = $this->formatTimezoneAbbr($timezone);
+
+        $statusLabels = [
+            'present' => 'Hadir',
+            'late' => 'Terlambat',
+            'on_leave' => 'Cuti',
+            'absent' => 'Absen',
+        ];
+        $dateRangeLabel = $filters['start_date'] === $filters['end_date']
+            ? $filters['start_date']
+            : "{$filters['start_date']} s/d {$filters['end_date']}";
+        $companyName = $company?->name ?: 'Perusahaan';
+        $companyDetails = $company?->details ?: '';
+        $companyAddress = $company?->location_address ?: '';
+
+        if ($format === 'pdf') {
+            $companyLogoSrc = null;
+            if ($company?->logo_path && Storage::disk('public')->exists($company->logo_path)) {
+                $logoData = Storage::disk('public')->get($company->logo_path);
+                $mime = Storage::disk('public')->mimeType($company->logo_path) ?: 'image/png';
+                $companyLogoSrc = 'data:'.$mime.';base64,'.base64_encode($logoData);
+            } elseif (file_exists(public_path('logo-color.png'))) {
+                $logoData = file_get_contents(public_path('logo-color.png'));
+                $companyLogoSrc = 'data:image/png;base64,'.base64_encode($logoData);
+            }
+
+            $mappedRows = $rows->map(function (EmployeeAttendance $row) use ($statusLabels, $timezone) {
+                $rowTz = $this->validTimezone($row->timezone) ?? $timezone;
+                $rowTzAbbr = $this->formatTimezoneAbbr($rowTz);
+
+                $lateInfo = $row->late_minutes !== null && $row->late_minutes > 0
+                    ? $this->formatLateDuration($row->late_minutes)
+                    : '-';
+
+                return [
+                    'attendance_date' => $row->attendance_date?->format('Y-m-d') ?? '-',
+                    'employee_code' => $row->employee?->employee_code ?? '-',
+                    'full_name' => $row->employee?->full_name ?? '-',
+                    'status' => $row->status,
+                    'status_label' => $statusLabels[$row->status] ?? $row->status,
+                    'late_info' => $lateInfo,
+                    'check_in' => $this->localExportTime($row->check_in_at, $rowTz),
+                    'check_out' => $this->localExportTime($row->check_out_at, $rowTz),
+                    'timezone' => $rowTzAbbr,
+                    'notes' => $row->notes,
+                ];
+            });
+
+            $summary = [
+                'total' => $rows->count(),
+                'present' => $rows->where('status', 'present')->count(),
+                'late' => $rows->where('status', 'late')->count(),
+                'on_leave' => $rows->where('status', 'on_leave')->count(),
+                'absent' => $rows->where('status', 'absent')->count(),
+            ];
+
+            $fileName = 'Laporan_Kehadiran_'.now()->format('Ymd_His').'.pdf';
+
+            return Pdf::loadView('hris.attendances.export', [
+                'documentTitle' => $fileName,
+                'companyName' => $companyName,
+                'companyDetails' => $companyDetails,
+                'companyAddress' => $companyAddress,
+                'companyLogoSrc' => $companyLogoSrc,
+                'dateRangeLabel' => $dateRangeLabel,
+                'statusFilterLabel' => $filters['status'] !== '' ? ($statusLabels[$filters['status']] ?? $filters['status']) : 'Semua',
+                'timezoneAbbr' => $timezoneAbbr,
+                'summary' => $summary,
+                'rows' => $mappedRows,
+                'generatedAt' => now()->setTimezone($timezone)->locale('id')->translatedFormat('d F Y H:i'),
+            ])
+                ->setPaper('a4', 'landscape')
+                ->download($fileName);
+        }
+
+        $fileName = 'attendances_'.now()->format('Ymd_His').'.xls';
+
+        return response()->streamDownload(function () use ($rows, $companyName, $companyDetails, $filters, $timezone, $timezoneAbbr, $statusLabels, $dateRangeLabel): void {
+            $escape = fn (mixed $value): string => e((string) ($value ?? ''));
+            $generatedAt = now()->setTimezone($timezone)->format('Y-m-d H:i:s');
+
+            echo '<!DOCTYPE html><html><head><meta charset="UTF-8">';
+            echo '<style>
+                body { font-family: Arial, sans-serif; color: #111827; }
+                .report { position: relative; }
+                table { border-collapse: collapse; width: 100%; position: relative; z-index: 1; }
+                th, td { border: 1px solid #9ca3af; padding: 7px; font-size: 12px; vertical-align: top; }
+                th { background: #e5e7eb; font-weight: 700; text-align: left; }
+                .header td { border: none; padding: 2px 0; }
+                .company { font-size: 18px; font-weight: 700; }
+                .title { font-size: 16px; font-weight: 700; padding-top: 10px; }
+                .meta { color: #374151; font-size: 12px; }
+            </style></head><body><div class="report">';
+            echo '<table class="header">';
+            echo '<tr><td class="company" colspan="7">'.$escape($companyName).'</td></tr>';
+            echo '<tr><td colspan="7">'.nl2br($escape($companyDetails)).'</td></tr>';
+            echo '<tr><td class="title" colspan="7">Laporan Kehadiran</td></tr>';
+            echo '<tr><td class="meta" colspan="7">Tanggal laporan: '.$escape($dateRangeLabel).'</td></tr>';
+            echo '<tr><td class="meta" colspan="7">Status: '.$escape($filters['status'] !== '' ? ($statusLabels[$filters['status']] ?? $filters['status']) : 'Semua').'</td></tr>';
+            echo '<tr><td class="meta" colspan="7">Zona Waktu: '.$escape($timezoneAbbr).'</td></tr>';
+            echo '<tr><td class="meta" colspan="7">Generated at: '.$escape($generatedAt).'</td></tr>';
+            echo '<tr><td colspan="7">&nbsp;</td></tr>';
+            echo '</table>';
+            echo '<table>';
+            echo '<thead><tr>';
+            foreach (['Tanggal', 'Kode Pegawai', 'Nama Pegawai', 'Status', 'Keterlambatan', 'Check In', 'Check Out', 'Zona Waktu', 'Catatan'] as $heading) {
+                echo '<th>'.$escape($heading).'</th>';
+            }
+            echo '</tr></thead><tbody>';
+
+            if ($rows->isEmpty()) {
+                echo '<tr><td colspan="9">Tidak ada data kehadiran.</td></tr>';
+            }
+
+            foreach ($rows as $row) {
+                echo '<tr>';
+                echo '<td>'.$escape($row->attendance_date?->format('Y-m-d')).'</td>';
+                echo '<td>'.$escape($row->employee?->employee_code).'</td>';
+                echo '<td>'.$escape($row->employee?->full_name).'</td>';
+                echo '<td>'.$escape($statusLabels[$row->status] ?? $row->status).'</td>';
+                echo '<td>'.$escape($row->late_minutes !== null && $row->late_minutes > 0 ? $this->formatLateDuration($row->late_minutes) : '-').'</td>';
+                $rowTimezone = $this->validTimezone($row->timezone) ?? $timezone;
+                echo '<td>'.$escape($this->localExportTime($row->check_in_at, $rowTimezone)).'</td>';
+                echo '<td>'.$escape($this->localExportTime($row->check_out_at, $rowTimezone)).'</td>';
+                echo '<td>'.$escape($this->formatTimezoneAbbr($rowTimezone)).'</td>';
+                echo '<td>'.$escape($row->notes).'</td>';
+                echo '</tr>';
+            }
+
+            echo '</tbody></table>';
+            echo '<p class="meta">Generated by Humi</p>';
+            echo '</div></body></html>';
+        }, $fileName, [
+            'Content-Type' => 'application/vnd.ms-excel; charset=UTF-8',
+        ]);
+    }
+
+    private function formatTimezoneAbbr(?string $timezone): string
+    {
+        $tz = trim((string) $timezone);
+
+        return match ($tz) {
+            'Asia/Jakarta', 'Asia/Pontianak', 'WIB' => 'WIB',
+            'Asia/Makassar', 'Asia/Ujung_Pandang', 'WITA' => 'WITA',
+            'Asia/Jayapura', 'WIT' => 'WIT',
+            default => str_contains($tz, 'Makassar') || str_contains($tz, 'WITA')
+                ? 'WITA'
+                : (str_contains($tz, 'Jayapura') || str_contains($tz, 'WIT') ? 'WIT' : 'WIB'),
+        };
+    }
+
+    private function localExportTime(mixed $value, string $timezone): ?string
+    {
+        if (blank($value)) {
+            return null;
+        }
+
+        return Carbon::parse($value, config('app.timezone'))->setTimezone($timezone)->format('H:i');
+    }
+
+    private function lateLevelLabel(?string $level): string
+    {
+        return match ($level) {
+            'level_1' => 'Level 1',
+            'level_2' => 'Level 2',
+            'level_3' => 'Level 3',
+            default => '-',
+        };
+    }
+
+    public function formatLateDuration(?int $minutes): string
+    {
+        if ($minutes === null || $minutes <= 0) {
+            return '-';
+        }
+
+        $hours = intdiv($minutes, 60);
+        $mins = $minutes % 60;
+
+        return "{$hours} jam {$mins} menit";
+    }
+
+    private function deviceTimezone(Request $request): string
+    {
+        $timezone = (string) $request->input('timezone', $request->header('X-Timezone', config('app.timezone')));
+
+        return in_array($timezone, timezone_identifiers_list(), true)
+            ? $timezone
+            : config('app.timezone');
+    }
+
+    private function validTimezone(mixed $timezone): ?string
+    {
+        return is_string($timezone) && in_array($timezone, timezone_identifiers_list(), true)
+            ? $timezone
+            : null;
+    }
+
+    /**
+     * @param  array<string, mixed>  $validated
+     */
+    private function normalizeAttendanceTimestamps(array &$validated, string $timezone): void
+    {
+        foreach (['check_in_at', 'check_out_at'] as $key) {
+            if (blank($validated[$key] ?? null)) {
+                $validated[$key] = null;
+
+                continue;
+            }
+
+            $value = (string) $validated[$key];
+
+            $validated[$key] = preg_match('/(?:Z|[+-]\d{2}:?\d{2})$/', $value) === 1
+                ? Carbon::parse($value)->setTimezone(config('app.timezone'))->format('Y-m-d H:i:s')
+                : Carbon::parse($value, $timezone)->setTimezone(config('app.timezone'))->format('Y-m-d H:i:s');
+        }
+    }
+}

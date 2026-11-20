@@ -1,0 +1,130 @@
+<?php
+
+use App\Http\Controllers\Api\Mobile\V1\AttendanceController;
+use App\Http\Controllers\Api\Mobile\V1\AttendanceCorrectionRequestController;
+use App\Http\Controllers\Api\Mobile\V1\BackupAttendanceController;
+use App\Http\Controllers\Api\Mobile\V1\AuthController;
+use App\Http\Controllers\Api\Mobile\V1\DashboardController;
+use App\Http\Controllers\Api\Mobile\V1\EmployeeController;
+use App\Http\Controllers\Api\Mobile\V1\KasbonController;
+use App\Http\Controllers\Api\Mobile\V1\LeaveController;
+use App\Http\Controllers\Api\Mobile\V1\MasterController;
+use App\Http\Controllers\Api\Mobile\V1\OvertimeController;
+use App\Http\Controllers\Api\Mobile\V1\PayrollController;
+use App\Http\Controllers\Api\Mobile\V1\PortalController;
+use App\Http\Controllers\Api\Mobile\V1\ProfileController;
+use App\Http\Controllers\Api\Mobile\V1\ShiftChangeRequestController;
+use App\Http\Controllers\Api\PakasirWebhookController;
+use App\Http\Controllers\Api\PublicCareerController;
+use App\Http\Controllers\Api\SumopodWebhookController;
+use App\Http\Controllers\Api\ThirdParty\V1\AttendanceController as ThirdPartyAttendanceController;
+use App\Http\Controllers\Api\ThirdParty\V1\AuthController as ThirdPartyAuthController;
+use App\Http\Controllers\Hris\ScheduleController;
+use App\Http\Controllers\Api\ThirdParty\V1\CompanyController as ThirdPartyCompanyController;
+use App\Http\Controllers\Api\ThirdParty\V1\EmployeeController as ThirdPartyEmployeeController;
+use App\Http\Controllers\Api\ThirdParty\V1\LeaveController as ThirdPartyLeaveController;
+use App\Http\Controllers\Api\ThirdParty\V1\OvertimeController as ThirdPartyOvertimeController;
+use App\Http\Controllers\Api\ThirdParty\V1\RecruitmentController as ThirdPartyRecruitmentController;
+use Illuminate\Support\Facades\Route;
+use Laravel\Sanctum\Http\Middleware\CheckAbilities;
+
+Route::post('webhooks/pakasir', PakasirWebhookController::class)->name('webhooks.pakasir');
+Route::post('webhooks/sumopod', SumopodWebhookController::class)->name('webhooks.sumopod');
+Route::post('webhooks/telegram', [\App\Http\Controllers\Api\TelegramWebhookController::class, 'handle'])->name('webhooks.telegram');
+
+// Public Career Recruitment API per Company Account
+Route::prefix('v1/companies/{company}/careers')->name('api.v1.careers.')->group(function (): void {
+    Route::get('/', [PublicCareerController::class, 'index'])->name('index');
+    Route::get('{slug}', [PublicCareerController::class, 'show'])->name('show');
+    Route::post('{slug}/apply', [PublicCareerController::class, 'apply'])->name('apply');
+});
+
+Route::prefix('careers/companies/{company}')->name('api.careers.')->group(function (): void {
+    Route::get('/', [PublicCareerController::class, 'index'])->name('index');
+    Route::get('{slug}', [PublicCareerController::class, 'show'])->name('show');
+    Route::post('{slug}/apply', [PublicCareerController::class, 'apply'])->name('apply');
+});
+
+Route::prefix('third-party/v1')->name('third-party.v1.')->group(function (): void {
+    Route::post('auth/token', [ThirdPartyAuthController::class, 'issueToken'])
+        ->middleware('throttle:10,1')
+        ->name('auth.token');
+
+    Route::middleware(['auth:sanctum', CheckAbilities::class.':third-party'])->group(function (): void {
+        Route::delete('auth/token', [ThirdPartyAuthController::class, 'revokeCurrentToken'])->name('auth.token.revoke');
+        Route::get('company', [ThirdPartyCompanyController::class, 'show'])->name('company.show');
+        Route::get('employees', [ThirdPartyEmployeeController::class, 'index'])->name('employees.index');
+        Route::get('employees/{employee}', [ThirdPartyEmployeeController::class, 'show'])->name('employees.show');
+        Route::get('attendances', [ThirdPartyAttendanceController::class, 'index'])->name('attendances.index');
+        Route::get('leaves', [ThirdPartyLeaveController::class, 'index'])->name('leaves.index');
+        Route::get('overtimes', [ThirdPartyOvertimeController::class, 'index'])->name('overtimes.index');
+        Route::get('recruitment/vacancies', [ThirdPartyRecruitmentController::class, 'vacancies'])->name('recruitment.vacancies.index');
+        Route::get('recruitment/vacancies/{id}', [ThirdPartyRecruitmentController::class, 'showVacancy'])->name('recruitment.vacancies.show');
+        Route::post('recruitment/vacancies', [ThirdPartyRecruitmentController::class, 'storeVacancy'])->name('recruitment.vacancies.store');
+        Route::put('recruitment/vacancies/{id}', [ThirdPartyRecruitmentController::class, 'updateVacancy'])->name('recruitment.vacancies.update');
+        Route::get('recruitment/applications', [ThirdPartyRecruitmentController::class, 'applications'])->name('recruitment.applications.index');
+        Route::get('recruitment/applications/{id}', [ThirdPartyRecruitmentController::class, 'showApplication'])->name('recruitment.applications.show');
+        Route::put('recruitment/applications/{id}/stage', [ThirdPartyRecruitmentController::class, 'updateStage'])->name('recruitment.applications.update-stage');
+    });
+});
+
+Route::prefix('mobile/v1')->name('mobile.v1.')->group(function (): void {
+    Route::post('auth/login', [AuthController::class, 'login'])->name('auth.login');
+    Route::post('auth/portal-login', [AuthController::class, 'portalLogin'])
+        ->middleware('throttle:10,1')
+        ->name('auth.portal-login');
+
+    Route::middleware(['auth:sanctum', 'require.bearer', CheckAbilities::class.':mobile'])->group(function (): void {
+        Route::post('auth/logout', [AuthController::class, 'logout'])->name('auth.logout');
+        Route::get('auth/me', [AuthController::class, 'me'])->name('auth.me');
+
+        Route::get('dashboard/summary', [DashboardController::class, 'summary'])->name('dashboard.summary');
+        Route::get('portal/summary', [PortalController::class, 'summary'])->name('portal.summary');
+        Route::get('portal/attendance-requests', [AttendanceCorrectionRequestController::class, 'index'])->name('portal.attendance-requests.index');
+        Route::post('portal/attendance-requests', [AttendanceCorrectionRequestController::class, 'store'])->name('portal.attendance-requests.store');
+        Route::get('portal/backup-attendance/colleagues', [BackupAttendanceController::class, 'colleagues'])->name('portal.backup-attendance.colleagues');
+        Route::get('portal/backup-attendance/status', [BackupAttendanceController::class, 'status'])->name('portal.backup-attendance.status');
+        Route::post('portal/backup-attendance/check-in', [BackupAttendanceController::class, 'checkIn'])->name('portal.backup-attendance.check-in');
+        Route::post('portal/backup-attendance/check-out', [BackupAttendanceController::class, 'checkOut'])->name('portal.backup-attendance.check-out');
+        Route::get('portal/shift-change-requests', [ShiftChangeRequestController::class, 'index'])->name('portal.shift-change-requests.index');
+        Route::post('portal/shift-change-requests', [ShiftChangeRequestController::class, 'store'])->name('portal.shift-change-requests.store');
+        Route::get('master/options', [MasterController::class, 'index'])->name('master.index');
+
+        Route::get('employees', [EmployeeController::class, 'index'])->name('employees.index');
+        Route::get('employees/{employee}', [EmployeeController::class, 'show'])->name('employees.show');
+
+        Route::get('attendances', [AttendanceController::class, 'index'])->name('attendances.index');
+        Route::get('portal/attendance-policy', [AttendanceController::class, 'attendancePolicy'])->name('portal.attendance-policy');
+        Route::post('portal/attendance-location/check', [AttendanceController::class, 'checkLocation'])->name('portal.attendance-location.check');
+        Route::get('portal/is-holiday', [ScheduleController::class, 'checkHoliday'])->name('portal.is-holiday');
+        Route::post('attendances', [AttendanceController::class, 'store'])->name('attendances.store');
+        Route::put('attendances/{employeeAttendance}', [AttendanceController::class, 'update'])->name('attendances.update');
+        Route::delete('attendances/{employeeAttendance}', [AttendanceController::class, 'destroy'])->name('attendances.destroy');
+
+        Route::get('leaves', [LeaveController::class, 'index'])->name('leaves.index');
+        Route::post('leaves', [LeaveController::class, 'store'])->name('leaves.store');
+        Route::put('leaves/{leave}', [LeaveController::class, 'update'])->name('leaves.update');
+        Route::delete('leaves/{leave}', [LeaveController::class, 'destroy'])->name('leaves.destroy');
+
+        Route::get('overtimes', [OvertimeController::class, 'index'])->name('overtimes.index');
+        Route::post('overtimes', [OvertimeController::class, 'store'])->name('overtimes.store');
+        Route::put('overtimes/{overtime}', [OvertimeController::class, 'update'])->name('overtimes.update');
+        Route::delete('overtimes/{overtime}', [OvertimeController::class, 'destroy'])->name('overtimes.destroy');
+
+        Route::get('kasbons', [KasbonController::class, 'index'])->name('kasbons.index');
+        Route::post('kasbons', [KasbonController::class, 'store'])->name('kasbons.store');
+        Route::put('kasbons/{employeeDeduction}', [KasbonController::class, 'update'])->name('kasbons.update');
+        Route::delete('kasbons/{employeeDeduction}', [KasbonController::class, 'destroy'])->name('kasbons.destroy');
+
+        Route::get('payrolls/preview', [PayrollController::class, 'preview'])->name('payrolls.preview');
+        Route::post('payrolls/generate', [PayrollController::class, 'generate'])->name('payrolls.generate');
+        Route::post('payrolls/{payrollRun}/save', [PayrollController::class, 'save'])->name('payrolls.save');
+        Route::get('payrolls/history', [PayrollController::class, 'history'])->name('payrolls.history');
+
+        Route::get('profile', [ProfileController::class, 'show'])->name('profile.show');
+        Route::put('profile', [ProfileController::class, 'updateProfile'])->name('profile.update');
+        Route::put('profile/bank-account', [ProfileController::class, 'updateBankAccount'])->name('profile.bank-account.update');
+        Route::post('profile/enroll-face', [ProfileController::class, 'enrollFace'])->name('profile.enroll-face');
+        Route::match(['delete', 'post'], 'profile/delete-face', [ProfileController::class, 'deleteFace'])->name('profile.delete-face');
+    });
+});

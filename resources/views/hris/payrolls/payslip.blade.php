@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <title>{{ $documentTitle }}</title>
+    <style>
+        body {
+            font-family: system-ui, sans-serif;
+            color: #0f172a;
+            margin: 2.5px;
+            font-size: 9pt;
+        }
+
+        h1, h2, h3, p {
+            margin: 0;
+        }
+
+        .shell {
+            border: 1px solid #dbe3ea;
+            border-radius: 12px;
+            overflow: hidden;
+        }
+
+        .hero {
+            background: #f8fafc;
+            color: #0f172a;
+            padding: 16px 18px;
+        }
+
+        .hero-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .hero-table td {
+            vertical-align: top;
+        }
+
+        .logo-cell {
+            width: 140px;
+            text-align: right;
+        }
+
+        .company-logo {
+            max-width: 125px;
+            max-height: 69px;
+            object-fit: contain;
+        }
+
+        .hero h1 {
+            font-size: 18px;
+            margin-top: 4px;
+        }
+
+        .muted {
+            color: #64748b;
+        }
+
+        .hero .muted {
+            color: #64748b;
+        }
+
+        .section {
+            padding: 8px 12px;
+            border-top: 1px solid #e2e8f0;
+        }
+
+        .grid {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 6pt !important;
+            line-height: 1.12;
+        }
+
+        .grid td {
+            padding: 0.7px 0 !important;
+            font-size: 6pt !important;
+            line-height: 1.12;
+            vertical-align: top;
+        }
+
+        .label {
+            width: 100px;
+            color: #64748b;
+        }
+
+        .columns {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .columns > tbody > tr > td {
+            width: 50%;
+            vertical-align: top;
+        }
+
+        .columns > tbody > tr > td:first-child {
+            padding-right: 4px;
+        }
+
+        .columns > tbody > tr > td:last-child {
+            padding-left: 4px;
+        }
+
+        .panel-title {
+            font-size: 7.5pt !important;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: #475569;
+            margin-bottom: 4px;
+            line-height: 1.1;
+        }
+
+        .money-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 6pt !important;
+            line-height: 1.12;
+        }
+
+        .money-table th,
+        .money-table td {
+            padding: 2.8px 0 !important;
+            border-bottom: 1px solid #e2e8f0;
+            font-size: 6pt !important;
+            line-height: 1.12;
+            text-align: left;
+        }
+
+        .money-table td:last-child,
+        .money-table th:last-child {
+            text-align: right;
+        }
+
+        .summary {
+            margin-top: 6px;
+            padding: 7px 11px;
+            background: #f8fafc;
+            border-radius: 10px;
+            font-size: 6pt !important;
+            line-height: 1.12;
+        }
+
+        .summary strong {
+            float: right;
+        }
+
+        .take-home {
+            margin-top: 8px;
+            padding: 10px 12px;
+            background: #0f172a;
+            color: #fff;
+            border-radius: 10px;
+            font-size: 13px;
+        }
+
+        .take-home strong {
+            float: right;
+            font-size: 16px;
+        }
+
+    </style>
+</head>
+<body>
+    <div class="shell">
+        <div class="hero">
+            <table class="hero-table">
+                <tr>
+                    <td>
+                        <h1>Payslip {{ $periodLabel }}</h1>
+                        <p class="muted" style="margin-top: 8px;">{{ $companyName }}</p>
+                        @if ($companyDetails)<small class="muted" style="margin-top: 1px;">{{ $companyDetails }}</small>@endif
+                        <small class="muted" style="display: block; margin-top: 2px;">{{ $run->code }}{{ $run->batch_purpose === 'additional' ? ' · Pembayaran Tambahan' : '' }}</small>
+                    </td>
+                    <td class="logo-cell">
+                        @if ($companyLogoPath && is_file($companyLogoPath))
+                            <img src="{{ $companyLogoPath }}" class="company-logo" alt="{{ $companyName }}">
+                        @endif
+                    </td>
+                </tr>
+            </table>
+        </div>
+
+        <div class="section">
+            <h2 style="font-size: 9pt !important; margin-bottom: 4px; line-height: 1.1;">Informasi Karyawan</h2>
+            <table class="grid">
+                <tr>
+                    <td class="label">Nama</td>
+                    <td>{{ $employee->full_name }}</td>
+                </tr>
+                <tr>
+                    <td class="label">ID Karyawan</td>
+                    <td>{{ $employee->employee_code ?: '-' }}</td>
+                </tr>
+                <tr>
+                    <td class="label">Email</td>
+                    <td>{{ $employee->email ?: '-' }}</td>
+                </tr>
+                <tr>
+                    <td class="label">Divisi</td>
+                    <td>{{ $employee->division?->name ?: '-' }}</td>
+                </tr>
+                <tr>
+                    <td class="label">Jabatan</td>
+                    <td>{{ $employee->position?->name ?: '-' }}</td>
+                </tr>
+                @if ($slip->bpjs_kesehatan_class || $employee->bpjs_kesehatan_class)
+                <tr>
+                    <td class="label">Kelas BPJS Kes</td>
+                    <td>Kelas {{ $slip->bpjs_kesehatan_class ?: $employee->bpjs_kesehatan_class }}</td>
+                </tr>
+                @endif
+                <tr>
+                    <td class="label">Periode</td>
+                    <td>
+                        <span>{{ $run->period_start?->locale('id')->translatedFormat('d M Y') ?: '-' }}</span>
+                        -
+                        <span>{{ $run->period_end?->locale('id')->translatedFormat('d M Y') ?: '-' }}</span>
+                    </td>
+                </tr>
+            </table>
+        </div>
+
+        <div class="section">
+            <table class="columns">
+                <tr>
+                    <td>
+                        <h2 class="panel-title">Basic & Allowance</h2>
+                        <table class="money-table">
+                            <tbody>
+                                <tr>
+                                    <td>Gaji Pokok</td>
+                                    <td>Rp {{ number_format((float) $slip->base_salary, 0, ',', '.') }}</td>
+                                </tr>
+                                @foreach (($slip->allowance_breakdown ?? []) as $name => $amount)
+                                    <tr>
+                                        <td>{{ $name }}</td>
+                                        <td>Rp {{ number_format((float) $amount, 0, ',', '.') }}</td>
+                                    </tr>
+                                @endforeach
+                                @foreach (($slip->variable_allowance_breakdown ?? []) as $name => $amount)
+                                    <tr>
+                                        <td>{{ $name }} (Tidak Tetap)</td>
+                                        <td>Rp {{ number_format((float) $amount, 0, ',', '.') }}</td>
+                                    </tr>
+                                @endforeach
+                                @foreach (($slip->bonus_breakdown ?? []) as $name => $amount)
+                                    <tr>
+                                        <td>{{ $name }} (Bonus)</td>
+                                        <td>Rp {{ number_format((float) $amount, 0, ',', '.') }}</td>
+                                    </tr>
+                                @endforeach
+                                @if ((float) ($slip->overtime_pay ?? 0) > 0)
+                                    <tr>
+                                        <td>
+                                            Lembur
+                                            @if ((float) ($slip->overtime_hours ?? 0) > 0)
+                                                <small class="muted">({{ number_format((float) $slip->overtime_hours, 1) }} jam)</small>
+                                            @endif
+                                        </td>
+                                        <td>Rp {{ number_format((float) $slip->overtime_pay, 0, ',', '.') }}</td>
+                                    </tr>
+                                    @if (isset($eventOvertimes) && $eventOvertimes->count() > 0)
+                                        @foreach ($eventOvertimes as $otEvent)
+                                            <tr>
+                                                <td style="padding-left: 8px !important; color: #475569;">
+                                                    • {{ $otEvent->event_name }}
+                                                    @if ((float) $otEvent->total_hours > 0)
+                                                        <small>({{ number_format((float) $otEvent->total_hours, 1) }} jam)</small>
+                                                    @endif
+                                                </td>
+                                                <td style="color: #475569;">Rp {{ number_format((float) ($otEvent->event_nominal ?? 0), 0, ',', '.') }}</td>
+                                            </tr>
+                                        @endforeach
+                                    @endif
+                                @endif
+                            </tbody>
+                        </table>
+                    </td>
+                    <td>
+                        <h2 class="panel-title">Deduction & Tax</h2>
+                        <table class="money-table">
+                            <tbody>
+                                @if ((float) ($slip->pph21_deduction ?? 0) > 0 && ! in_array($slip->pph21_method, ['gross_up', 'ter_bulanan_gross_up'], true))
+                                    <tr>
+                                        <td>PPh21</td>
+                                        <td>(Rp {{ number_format((float) $slip->pph21_deduction, 0, ',', '.') }})</td>
+                                    </tr>
+                                @endif
+                                @if ((float) ($slip->bpjs_kesehatan_employee ?? 0) > 0)
+                                    <tr>
+                                        <td>BPJS Kesehatan (1%)</td>
+                                        <td>(Rp {{ number_format((float) $slip->bpjs_kesehatan_employee, 0, ',', '.') }})</td>
+                                    </tr>
+                                @endif
+                                @if ((float) ($slip->bpjs_jht_employee ?? 0) > 0)
+                                    <tr>
+                                        <td>BPJS Ketenagakerjaan (JHT 2%)</td>
+                                        <td>(Rp {{ number_format((float) $slip->bpjs_jht_employee, 0, ',', '.') }})</td>
+                                    </tr>
+                                @endif
+                                @if ((float) ($slip->bpjs_jp_employee ?? 0) > 0)
+                                    <tr>
+                                        <td>BPJS Ketenagakerjaan (JP 1%)</td>
+                                        <td>(Rp {{ number_format((float) $slip->bpjs_jp_employee, 0, ',', '.') }})</td>
+                                    </tr>
+                                @endif
+                                @if ((float) ($slip->private_insurance_nominal ?? 0) > 0)
+                                    <tr>
+                                        <td>{{ $slip->private_insurance_name ?: 'Asuransi Swasta' }}</td>
+                                        <td>(Rp {{ number_format((float) $slip->private_insurance_nominal, 0, ',', '.') }})</td>
+                                    </tr>
+                                @endif
+                                @if ((float) ($slip->kasbon_deduction ?? 0) > 0)
+                                    <tr>
+                                        <td>Kasbon</td>
+                                        <td>(Rp {{ number_format((float) $slip->kasbon_deduction, 0, ',', '.') }})</td>
+                                    </tr>
+                                @endif
+                                @php
+                                    $slipBreakdown = $slip->denda_breakdown ?? [];
+                                    $slipLate = 0.0;
+                                    $slipAtt = 0.0;
+                                    if (! empty($slipBreakdown)) {
+                                        foreach ($slipBreakdown as $b) {
+                                            if (! empty($b['is_reverted'])) {
+                                                continue;
+                                            }
+                                            $amt = (float) ($b['amount'] ?? 0);
+                                            $bType = (string) ($b['type'] ?? '');
+                                            $bDesc = strtolower((string) ($b['description'] ?? ''));
+                                            $bTitle = strtolower((string) ($b['title'] ?? ''));
+                                            $bHalfDay = ! empty($b['is_half_day']) || str_contains($bDesc, 'setengah hari') || str_contains($bTitle, 'setengah hari');
+                                            if ($bType === 'unrecorded_cutoff' || ($bType === 'late_attendance' && $bHalfDay)) {
+                                                $slipAtt += $amt;
+                                            } else {
+                                                $slipLate += $amt;
+                                            }
+                                        }
+                                    } else {
+                                        $slipLate = (float) ($slip->denda_deduction ?? 0);
+                                    }
+                                @endphp
+                                @if ($slipLate > 0)
+                                    <tr>
+                                        <td>Denda Keterlambatan</td>
+                                        <td>(Rp {{ number_format($slipLate, 0, ',', '.') }})</td>
+                                    </tr>
+                                @endif
+                                @if ($slipAtt > 0)
+                                    <tr>
+                                        <td>Potongan Kehadiran</td>
+                                        <td>(Rp {{ number_format($slipAtt, 0, ',', '.') }})</td>
+                                    </tr>
+                                @endif
+                                @if ((float) ($slip->unpaid_leave_deduction ?? 0) > 0)
+                                    <tr>
+                                        <td>Potongan Unpaid Leave</td>
+                                        <td>(Rp {{ number_format((float) $slip->unpaid_leave_deduction, 0, ',', '.') }})</td>
+                                    </tr>
+                                @endif
+                                @foreach (($slip->manual_deduction_breakdown ?? []) as $name => $amount)
+                                    <tr>
+                                        <td>{{ $name }}</td>
+                                        <td>(Rp {{ number_format((float) $amount, 0, ',', '.') }})</td>
+                                    </tr>
+                                @endforeach
+                            </tbody>
+                        </table>
+                    </td>
+                </tr>
+            </table>
+
+            @php
+                $hasCompanyBpjs = ((float) ($slip->bpjs_kesehatan_company ?? 0) > 0)
+                    || ((float) ($slip->bpjs_jkk_company ?? 0) > 0)
+                    || ((float) ($slip->bpjs_jkm_company ?? 0) > 0)
+                    || ((float) ($slip->bpjs_jht_company ?? 0) > 0)
+                    || ((float) ($slip->bpjs_jp_company ?? 0) > 0);
+                $hasPphAllowance = (float) ($slip->pph21_allowance ?? 0) > 0;
+                $hasPphCompanyBorne = (float) ($slip->pph21_company_borne ?? 0) > 0;
+                $hasBenefit = $hasCompanyBpjs || $hasPphAllowance || $hasPphCompanyBorne;
+            @endphp
+
+            @if ($hasBenefit)
+            <div style="margin-top: 6px; padding-top: 4px; border-top: 1px dashed #e2e8f0;">
+                <h2 class="panel-title">Benefit (Ditanggung Perusahaan)</h2>
+                <table class="money-table">
+                    <tbody>
+                        @if ((float) ($slip->bpjs_kesehatan_company ?? 0) > 0)
+                            <tr>
+                                <td>BPJS Kesehatan Perusahaan (4%)</td>
+                                <td>Rp {{ number_format((float) $slip->bpjs_kesehatan_company, 0, ',', '.') }}</td>
+                            </tr>
+                        @endif
+                        @if ((float) ($slip->bpjs_jkk_company ?? 0) > 0)
+                            <tr>
+                                <td>BPJS Ketenagakerjaan JKK Perusahaan</td>
+                                <td>Rp {{ number_format((float) $slip->bpjs_jkk_company, 0, ',', '.') }}</td>
+                            </tr>
+                        @endif
+                        @if ((float) ($slip->bpjs_jkm_company ?? 0) > 0)
+                            <tr>
+                                <td>BPJS Ketenagakerjaan JKM Perusahaan</td>
+                                <td>Rp {{ number_format((float) $slip->bpjs_jkm_company, 0, ',', '.') }}</td>
+                            </tr>
+                        @endif
+                        @if ((float) ($slip->bpjs_jht_company ?? 0) > 0)
+                            <tr>
+                                <td>BPJS Ketenagakerjaan JHT Perusahaan (3.7%)</td>
+                                <td>Rp {{ number_format((float) $slip->bpjs_jht_company, 0, ',', '.') }}</td>
+                            </tr>
+                        @endif
+                        @if ((float) ($slip->bpjs_jp_company ?? 0) > 0)
+                            <tr>
+                                <td>BPJS Ketenagakerjaan JP Perusahaan (2%)</td>
+                                <td>Rp {{ number_format((float) $slip->bpjs_jp_company, 0, ',', '.') }}</td>
+                            </tr>
+                        @endif
+                        @if ($hasPphAllowance)
+                            <tr>
+                                <td>Tunjangan PPh21 (Perusahaan)</td>
+                                <td>Rp {{ number_format((float) $slip->pph21_allowance, 0, ',', '.') }}</td>
+                            </tr>
+                        @endif
+                        @if ($hasPphCompanyBorne)
+                            <tr>
+                                <td>PPh21 Ditanggung Perusahaan</td>
+                                <td>Rp {{ number_format((float) $slip->pph21_company_borne, 0, ',', '.') }}</td>
+                            </tr>
+                        @endif
+                    </tbody>
+                </table>
+                <div style="font-size: 5pt; color: #94a3b8; margin-top: 2px;">
+                    * Benefit ditanggung sepenuhnya oleh perusahaan dan tidak dihitung ke dalam gaji / take home pay.
+                </div>
+            </div>
+            @endif
+
+            <div class="summary">
+                Total Penghasilan
+                <strong>Rp {{ number_format((float) $slip->base_salary + (float) $slip->allowances_total + (float) ($slip->overtime_pay ?? 0), 0, ',', '.') }}</strong>
+            </div>
+            <div class="summary">
+                Total Potongan
+                <strong>(Rp {{ number_format((float) $slip->deductions_total, 0, ',', '.') }})</strong>
+            </div>
+            <div class="take-home">
+                Take Home Pay
+                <strong>Rp {{ number_format((float) $slip->net_salary, 0, ',', '.') }}</strong>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

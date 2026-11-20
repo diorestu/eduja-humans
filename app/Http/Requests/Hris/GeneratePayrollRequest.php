@@ -1,0 +1,54 @@
+<?php
+
+namespace App\Http\Requests\Hris;
+
+use Illuminate\Contracts\Validation\ValidationRule;
+use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Rule;
+
+class GeneratePayrollRequest extends FormRequest
+{
+    protected function prepareForValidation(): void
+    {
+        if ($this->has('service_fee_total')) {
+            $this->merge([
+                'service_fee_total' => preg_replace('/[^0-9]/', '', (string) $this->input('service_fee_total')),
+            ]);
+        }
+    }
+
+    /**
+     * Determine if the user is authorized to make this request.
+     */
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    /**
+     * Get the validation rules that apply to the request.
+     *
+     * @return array<string, ValidationRule|array<mixed>|string>
+     */
+    public function rules(): array
+    {
+        $ownerId = $this->user()?->accountOwnerId();
+
+        return [
+            'period' => ['required', 'date_format:Y-m'],
+            'period_start' => ['nullable', 'date'],
+            'period_end' => ['nullable', 'date', 'after_or_equal:period_start'],
+            'batch_purpose' => ['nullable', 'in:regular,additional'],
+            'run_id' => ['nullable', 'integer', Rule::exists('payroll_runs', 'id')->where('user_id', $ownerId)->where('type', 'regular')],
+            'selected_employee_ids' => ['nullable', 'array', 'min:1'],
+            'selected_employee_ids.*' => ['integer', 'distinct', Rule::exists('employees', 'id')->where('user_id', $ownerId)],
+            'employee_scope' => ['nullable', 'in:all,parent_only'],
+            'excluded_employee_ids' => ['nullable', 'array'],
+            'excluded_employee_ids.*' => [
+                'integer',
+                Rule::exists('employees', 'id')->where('user_id', $ownerId),
+            ],
+            'service_fee_total' => ['nullable', 'numeric', 'min:0'],
+        ];
+    }
+}
